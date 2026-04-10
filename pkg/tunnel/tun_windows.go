@@ -33,7 +33,7 @@ func CreateTUN(cfg Config) (Device, error) {
 		return nil, fmt.Errorf("ensure wintun.dll: %w", err)
 	}
 
-	adapter, err := wintun.CreateAdapter(cfg.Name, "GodQV Networking", nil)
+	adapter, err := wintun.CreateAdapter(cfg.Name, "GodQV Networking Virtual LAN Ethernet Adapter", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create wintun adapter: %w", err)
 	}

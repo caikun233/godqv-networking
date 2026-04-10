@@ -40,6 +40,7 @@ type Client struct {
 	tunWriter TunWriter
 	mu        sync.Mutex
 	done      chan struct{}
+	closeOnce sync.Once
 	onPeerUpdate func([]PeerInfo)
 }
 
@@ -205,15 +206,18 @@ func (c *Client) StartReceiving() {
 	go c.keepaliveLoop()
 }
 
-// Close closes the connection.
+// Close closes the connection safely. It can be called multiple times.
 func (c *Client) Close() error {
-	close(c.done)
-	if c.conn != nil {
-		// Send leave message
-		protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeLeave})
-		return c.conn.Close()
-	}
-	return nil
+	var err error
+	c.closeOnce.Do(func() {
+		close(c.done)
+		if c.conn != nil {
+			// Send leave message
+			protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeLeave})
+			err = c.conn.Close()
+		}
+	})
+	return err
 }
 
 // Done returns a channel that is closed when the client is done.
@@ -223,11 +227,9 @@ func (c *Client) Done() <-chan struct{} {
 
 func (c *Client) receiveLoop() {
 	defer func() {
-		select {
-		case <-c.done:
-		default:
+		c.closeOnce.Do(func() {
 			close(c.done)
-		}
+		})
 	}()
 
 	for {
