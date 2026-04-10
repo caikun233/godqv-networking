@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"net"
 	"time"
 )
@@ -17,9 +18,9 @@ var stunServers = []string{
 
 // STUN message constants (RFC 5389).
 const (
-	stunMagicCookie = 0x2112A442
-	stunBindRequest = 0x0001
-	stunBindSuccess = 0x0101
+	stunMagicCookie       = 0x2112A442
+	stunBindRequest       = 0x0001
+	stunBindSuccess       = 0x0101
 	stunAttrXORMappedAddr = 0x0020
 	stunAttrMappedAddr    = 0x0001
 	stunHeaderSize        = 20
@@ -29,12 +30,15 @@ const (
 // (public) transport address as "ip:port".
 func stunDiscover(conn *net.UDPConn) (string, error) {
 	var lastErr error
-	for _, server := range stunServers {
+	for i, server := range stunServers {
+		log.Printf("[STUN] 尝试服务器 %d/%d: %s", i+1, len(stunServers), server)
 		addr, err := stunQuery(conn, server)
 		if err != nil {
+			log.Printf("[STUN] 服务器 %s 失败: %v", server, err)
 			lastErr = err
 			continue
 		}
+		log.Printf("[STUN] 成功! 公网地址: %s (通过 %s)", addr, server)
 		return addr, nil
 	}
 	return "", fmt.Errorf("all STUN servers failed: %w", lastErr)

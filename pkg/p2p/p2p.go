@@ -43,25 +43,29 @@ type PeerLink struct {
 
 // Manager handles P2P UDP connections for the local client.
 type Manager struct {
-	mu       sync.RWMutex
-	conn     *net.UDPConn
+	mu        sync.RWMutex
+	conn      *net.UDPConn
 	localAddr string // public address discovered via STUN
 
 	links    map[string]*PeerLink // peerVIP string -> link
 	onPacket func(packet []byte)  // callback for received data packets
 	onEvent  func(Event)          // optional callback for P2P events
 
-	done     chan struct{}
+	done      chan struct{}
 	closeOnce sync.Once
 }
 
 // NewManager creates a P2P manager with a local UDP socket.
 func NewManager(onPacket func(packet []byte)) (*Manager, error) {
+	log.Printf("[P2P] 初始化 P2P 管理器...")
+
 	// Bind to any available port.
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
 	if err != nil {
+		log.Printf("[P2P] 创建 UDP socket 失败: %v", err)
 		return nil, err
 	}
+	log.Printf("[P2P] 本地 UDP socket 已绑定: %s", conn.LocalAddr().String())
 
 	m := &Manager{
 		conn:     conn,
@@ -71,6 +75,7 @@ func NewManager(onPacket func(packet []byte)) (*Manager, error) {
 	}
 
 	// Discover public address via STUN.
+	log.Printf("[P2P] 正在通过 STUN 发现公网地址...")
 	pubAddr, err := stunDiscover(conn)
 	if err != nil {
 		log.Printf("[P2P] STUN 发现公网地址失败: %v (将仅使用本地地址)", err)
@@ -81,6 +86,7 @@ func NewManager(onPacket func(packet []byte)) (*Manager, error) {
 	}
 
 	go m.readLoop()
+	log.Printf("[P2P] P2P 管理器初始化完成，开始监听 UDP 数据包")
 
 	return m, nil
 }
@@ -120,13 +126,23 @@ func (m *Manager) emitEvent(evt Event) {
 // AddPeer begins hole-punching to the given peer. peerAddr is the peer's
 // public UDP endpoint as reported by the signaling server.
 func (m *Manager) AddPeer(peerVIP net.IP, peerAddr string) error {
+	log.Printf("[P2P] 添加对等节点: VIP=%s, 地址=%s", peerVIP, peerAddr)
+
 	addr, err := net.ResolveUDPAddr("udp4", peerAddr)
 	if err != nil {
+		log.Printf("[P2P] 解析对端地址失败: %s -> %v", peerAddr, err)
 		return err
 	}
 
 	vipStr := peerVIP.String()
 	m.mu.Lock()
+	// 检查是否已有活跃连接
+	if existing, ok := m.links[vipStr]; ok && existing.Active {
+		m.mu.Unlock()
+		log.Printf("[P2P] 已有活跃连接到 %s, 跳过打洞", peerVIP)
+		return nil
+	}
+
 	link := &PeerLink{
 		PeerVIP:  peerVIP,
 		PeerAddr: addr,
@@ -134,6 +150,8 @@ func (m *Manager) AddPeer(peerVIP net.IP, peerAddr string) error {
 	}
 	m.links[vipStr] = link
 	m.mu.Unlock()
+
+	log.Printf("[P2P] 开始 UDP 打洞: 本地=%s -> 对端=%s (VIP=%s)", m.localAddr, peerAddr, peerVIP)
 
 	// Start punching in background.
 	go m.punchHole(link)
@@ -171,6 +189,7 @@ func (m *Manager) GetActiveLink(vip net.IP) bool {
 
 // punchHole attempts to establish a direct UDP link by repeatedly sending probes.
 func (m *Manager) punchHole(link *PeerLink) {
+	log.Printf("[P2P] 开始打洞过程: 目标=%s (%s), 超时=%v", link.PeerVIP, link.PeerAddr, PunchTimeout)
 	m.emitEvent(Event{Type: EventPunchStart, PeerVIP: link.PeerVIP, PeerAddr: link.PeerAddr.String()})
 
 	deadline := time.After(PunchTimeout)
@@ -178,22 +197,29 @@ func (m *Manager) punchHole(link *PeerLink) {
 	defer ticker.Stop()
 
 	probe := []byte(MagicProbe + ":" + generateP2PToken())
+	probeCount := 0
 
 	for {
 		select {
 		case <-m.done:
+			log.Printf("[P2P] 打洞中断 (管理器关闭): %s", link.PeerVIP)
 			return
 		case <-deadline:
 			if !link.Active {
-				log.Printf("[P2P] 打洞超时: %s", link.PeerVIP)
+				log.Printf("[P2P] 打洞超时: %s (发送了 %d 个探测包), 可能原因: 对称NAT/防火墙阻挡/对端离线", link.PeerVIP, probeCount)
 				m.emitEvent(Event{Type: EventPunchTimeout, PeerVIP: link.PeerVIP, PeerAddr: link.PeerAddr.String()})
 			}
 			return
 		case <-ticker.C:
 			if link.Active {
+				log.Printf("[P2P] 打洞已成功, 停止发送探测包: %s", link.PeerVIP)
 				return // Already established
 			}
-			m.conn.WriteToUDP(probe, link.PeerAddr)
+			probeCount++
+			_, err := m.conn.WriteToUDP(probe, link.PeerAddr)
+			if err != nil {
+				log.Printf("[P2P] 发送探测包失败 #%d → %s: %v", probeCount, link.PeerAddr, err)
+			}
 		}
 	}
 }
