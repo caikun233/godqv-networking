@@ -1,0 +1,144 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Run tests
+        run: go test ./pkg/... -v -race
+
+  build:
+    name: Build
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: ''
+          - goos: linux
+            goarch: arm64
+            suffix: ''
+          - goos: windows
+            goarch: amd64
+            suffix: '.exe'
+          - goos: darwin
+            goarch: amd64
+            suffix: ''
+          - goos: darwin
+            goarch: arm64
+            suffix: ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Server
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o dist/godqv-server-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} \
+            ./cmd/server/
+
+      - name: Build Client
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+            -o dist/godqv-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }} \
+            ./cmd/client/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate config examples
+        run: |
+          cat > dist/server.json <<'EOF'
+          {
+            "listen_addr": ":9527",
+            "subnet_cidr": "10.100.0.0/16",
+            "users": {
+              "admin": "请修改此密码",
+              "user1": "请修改此密码"
+            },
+            "rooms": {
+              "default": {
+                "password": "",
+                "subnet": "10.100.1.0/24"
+              }
+            }
+          }
+          EOF
+          cat > dist/client.json <<'EOF'
+          {
+            "server_addr": "your-server.com:9527",
+            "username": "user1",
+            "password": "your-password",
+            "room_name": "default",
+            "room_password": ""
+          }
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## 神区互联 GodQV Networking
+
+            ### 下载
+            - **服务端**: `godqv-server-{os}-{arch}`
+            - **客户端**: `godqv-client-{os}-{arch}`
+            - **配置示例**: `server.json` / `client.json`
+
+            ### 快速开始
+            1. 下载对应平台的服务端和客户端
+            2. 参考 `server.json` 配置服务端
+            3. 参考 `client.json` 配置客户端
+            4. 详细部署文档请查看 README
