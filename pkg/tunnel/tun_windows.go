@@ -70,7 +70,7 @@ func CreateTUN(cfg Config) (Device, error) {
 		return nil, fmt.Errorf("start session: %w", err)
 	}
 
-	closeEvent, err := windows.CreateEvent(nil, 0, 0, nil)
+	closeEvent, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		session.End()
 		adapter.Close()

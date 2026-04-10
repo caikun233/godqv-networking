@@ -71,10 +71,8 @@ func (a *IPAllocator) AllocateForUser(username string) (net.IP, error) {
 
 	// Check for an existing lease.
 	if l, ok := a.leases[username]; ok {
-		ipStr := l.ip.String()
-		// The IP may still be marked as used if leases overlap, but since
-		// it is reserved for this user we can hand it back.
-		a.used[ipStr] = true
+		// The IP remains in the used set from when the lease was created,
+		// so we just need to track the user mapping and remove the lease.
 		result := make(net.IP, 4)
 		copy(result, l.ip.To4())
 		a.userToIP[username] = result
