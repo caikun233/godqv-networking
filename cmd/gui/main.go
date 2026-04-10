@@ -113,7 +113,8 @@ func openLogFile() (*os.File, string, error) {
 }
 
 func main() {
-	// On Windows this is a no-op; with -H windowsgui there is no console.
+	// On Windows, allocate a console window so that all log output is visible
+	// to the user for diagnostics (e.g. UDP hole-punching debugging).
 	attachConsole()
 
 	// Setup logger: write to the log file and the in-memory logger (which
