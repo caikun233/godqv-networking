@@ -14,7 +14,7 @@ server:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/godqv-server ./cmd/server/
 
 gui:
-	go build -ldflags="$(LDFLAGS)" -o dist/godqv-gui.exe ./cmd/gui/
+	go build -ldflags="$(LDFLAGS) -H windowsgui" -o dist/godqv-gui.exe ./cmd/gui/
 
 clean:
 	rm -rf dist/
@@ -30,7 +30,7 @@ build-linux:
 
 build-windows:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/godqv-server-windows-amd64.exe ./cmd/server/
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -ldflags="$(LDFLAGS)" -o dist/godqv-gui-windows-amd64.exe ./cmd/gui/
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -ldflags="$(LDFLAGS) -H windowsgui" -o dist/godqv-gui-windows-amd64.exe ./cmd/gui/
 
 
 build-darwin:

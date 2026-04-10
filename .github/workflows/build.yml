@@ -91,7 +91,7 @@ jobs:
           GOARCH: amd64
           CGO_ENABLED: 1
         run: |
-          go build -ldflags="-s -w -X main.version=${{ github.ref_name }}" \
+          go build -ldflags="-s -w -H windowsgui -X main.version=${{ github.ref_name }}" \
             -o dist/godqv-gui-windows-amd64.exe \
             ./cmd/gui/
 

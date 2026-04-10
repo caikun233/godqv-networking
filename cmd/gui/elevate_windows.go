@@ -10,27 +10,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var (
-	kernel32     = syscall.NewLazyDLL("kernel32.dll")
-	procAllocConsole = kernel32.NewProc("AllocConsole")
-)
-
-// attachConsole allocates a Windows console for this process so that log
-// output written to os.Stdout/os.Stderr is visible to the user even when the
-// binary was linked with -H windowsgui.  If a console already exists (e.g.
-// the binary was launched from an existing cmd.exe window) AllocConsole fails
-// silently and the existing console is kept.
-func attachConsole() {
-	procAllocConsole.Call() // no-op if already attached
-
-	// Re-open os.Stdout / os.Stderr to the new console so that Go's runtime
-	// and the standard library actually write to it.
-	conout, err := os.OpenFile("CONOUT$", os.O_RDWR, 0)
-	if err == nil {
-		os.Stdout = conout
-		os.Stderr = conout
-	}
-}
+// attachConsole is a no-op.  The GUI binary is built with -H windowsgui so
+// there is no console to attach to.  Log output goes to the log file and the
+// in-app log viewer instead.
+func attachConsole() {}
 
 // ensureElevated checks if the current process is running with administrator
 // privileges. If not, it re-launches itself via ShellExecuteW with the "runas"
