@@ -51,6 +51,34 @@ func readBool(r io.Reader) (bool, error) {
 	return b[0] != 0, nil
 }
 
+func writeStringSlice(w io.Writer, ss []string) error {
+	if err := binary.Write(w, binary.BigEndian, uint16(len(ss))); err != nil {
+		return err
+	}
+	for _, s := range ss {
+		if err := writeString(w, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readStringSlice(r io.Reader) ([]string, error) {
+	var count uint16
+	if err := binary.Read(r, binary.BigEndian, &count); err != nil {
+		return nil, err
+	}
+	ss := make([]string, count)
+	for i := range ss {
+		s, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		ss[i] = s
+	}
+	return ss, nil
+}
+
 func writeIP(w io.Writer, ip net.IP) error {
 	ip4 := ip.To4()
 	if ip4 == nil {
@@ -467,6 +495,11 @@ func EncodeP2PPunchResponse(resp *P2PPunchResponse) ([]byte, error) {
 	if err := writeString(&buf, resp.Token); err != nil {
 		return nil, err
 	}
+	// New fields: NATType + Candidates
+	buf.WriteByte(resp.NATType)
+	if err := writeStringSlice(&buf, resp.Candidates); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 
@@ -485,7 +518,21 @@ func DecodeP2PPunchResponse(data []byte) (*P2PPunchResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &P2PPunchResponse{PeerVIP: ip, PeerAddr: addr, Token: token}, nil
+	resp := &P2PPunchResponse{PeerVIP: ip, PeerAddr: addr, Token: token}
+	// Read new fields if present (backward compatibility).
+	if r.Len() > 0 {
+		natType, err := r.ReadByte()
+		if err == nil {
+			resp.NATType = natType
+		}
+		if r.Len() > 0 {
+			candidates, err := readStringSlice(r)
+			if err == nil {
+				resp.Candidates = candidates
+			}
+		}
+	}
+	return resp, nil
 }
 
 // EncodeP2POffer serializes a P2POffer.
@@ -498,6 +545,11 @@ func EncodeP2POffer(offer *P2POffer) ([]byte, error) {
 		return nil, err
 	}
 	if err := writeString(&buf, offer.Token); err != nil {
+		return nil, err
+	}
+	// New fields: NATType + Candidates
+	buf.WriteByte(offer.NATType)
+	if err := writeStringSlice(&buf, offer.Candidates); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -518,7 +570,21 @@ func DecodeP2POffer(data []byte) (*P2POffer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &P2POffer{FromVIP: ip, UDPAddr: addr, Token: token}, nil
+	offer := &P2POffer{FromVIP: ip, UDPAddr: addr, Token: token}
+	// Read new fields if present.
+	if r.Len() > 0 {
+		natType, err := r.ReadByte()
+		if err == nil {
+			offer.NATType = natType
+		}
+		if r.Len() > 0 {
+			candidates, err := readStringSlice(r)
+			if err == nil {
+				offer.Candidates = candidates
+			}
+		}
+	}
+	return offer, nil
 }
 
 // EncodeP2PAnswer serializes a P2PAnswer.
@@ -534,6 +600,11 @@ func EncodeP2PAnswer(answer *P2PAnswer) ([]byte, error) {
 		return nil, err
 	}
 	if err := writeBool(&buf, answer.Accepted); err != nil {
+		return nil, err
+	}
+	// New fields: NATType + Candidates
+	buf.WriteByte(answer.NATType)
+	if err := writeStringSlice(&buf, answer.Candidates); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -558,5 +629,19 @@ func DecodeP2PAnswer(data []byte) (*P2PAnswer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &P2PAnswer{FromVIP: ip, UDPAddr: addr, Token: token, Accepted: accepted}, nil
+	answer := &P2PAnswer{FromVIP: ip, UDPAddr: addr, Token: token, Accepted: accepted}
+	// Read new fields if present.
+	if r.Len() > 0 {
+		natType, err := r.ReadByte()
+		if err == nil {
+			answer.NATType = natType
+		}
+		if r.Len() > 0 {
+			candidates, err := readStringSlice(r)
+			if err == nil {
+				answer.Candidates = candidates
+			}
+		}
+	}
+	return answer, nil
 }

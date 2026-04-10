@@ -515,6 +515,9 @@ func (g *GUI) showMainScreen() {
 	g.client.SetP2PEventCallback(func(event p2p.Event) {
 		var msg string
 		switch event.Type {
+		case p2p.EventNATDetected:
+			msg = fmt.Sprintf("NAT类型: %s", event.NATType)
+			log.Printf("[P2P-GUI] NAT类型检测: %s", event.NATType)
 		case p2p.EventPunchStart:
 			msg = fmt.Sprintf("P2P: 正在与 %s 打洞...", event.PeerVIP)
 			log.Printf("[P2P-GUI] 开始打洞: 对端VIP=%s, 对端地址=%s", event.PeerVIP, event.PeerAddr)
@@ -522,7 +525,7 @@ func (g *GUI) showMainScreen() {
 			msg = fmt.Sprintf("P2P: 与 %s 打洞成功! (UDP: %s)", event.PeerVIP, event.PeerAddr)
 			log.Printf("[P2P-GUI] 打洞成功: 对端VIP=%s, UDP地址=%s", event.PeerVIP, event.PeerAddr)
 		case p2p.EventPunchTimeout:
-			msg = fmt.Sprintf("P2P: 与 %s 打洞超时 (对方可能在对称NAT后, 将使用TCP中继)", event.PeerVIP)
+			msg = fmt.Sprintf("P2P: 与 %s 打洞超时 (将使用TCP中继)", event.PeerVIP)
 			log.Printf("[P2P-GUI] 打洞超时: 对端VIP=%s, 对端地址=%s (可能原因: 对称NAT/防火墙/Hairpin NAT不支持/对端离线)", event.PeerVIP, event.PeerAddr)
 		}
 		if msg != "" {

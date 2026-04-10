@@ -33,14 +33,16 @@ type RoomConfig struct {
 
 // Client represents a connected client.
 type Client struct {
-	conn      net.Conn
-	username  string
-	token     string
-	virtualIP net.IP
-	roomName  string
-	udpAddr   string // public UDP endpoint for P2P
-	mu        sync.Mutex
-	lastPing  time.Time
+	conn       net.Conn
+	username   string
+	token      string
+	virtualIP  net.IP
+	roomName   string
+	udpAddr    string   // public UDP endpoint for P2P
+	natType    uint8    // NAT type (0=unknown, 1=cone, 2=symmetric)
+	candidates []string // candidate UDP addresses for P2P
+	mu         sync.Mutex
+	lastPing   time.Time
 }
 
 // Room represents a virtual network room.
@@ -638,19 +640,24 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	client.mu.Lock()
 	clientVIP := client.virtualIP
 	clientUDP := client.udpAddr
+	clientNAT := client.natType
+	clientCandidates := make([]string, len(client.candidates))
+	copy(clientCandidates, client.candidates)
 	client.mu.Unlock()
 
-	log.Printf("[Server-P2P] 中继打洞: %s (UDP=%s) ←→ %s (UDP=%s), Token=%s",
-		client.username, clientUDP, target.username, target.udpAddr, token)
+	log.Printf("[Server-P2P] 中继打洞: %s (UDP=%s, NAT=%d) ←→ %s (UDP=%s, NAT=%d), Token=%s",
+		client.username, clientUDP, clientNAT, target.username, target.udpAddr, target.natType, token)
 
 	if clientUDP == "" {
 		log.Printf("[Server-P2P] ⚠ 警告: 请求方 %s 没有UDP地址 (P2P可能未初始化)", client.username)
 	}
 
 	offer := &protocol.P2POffer{
-		FromVIP: clientVIP,
-		UDPAddr: clientUDP,
-		Token:   token,
+		FromVIP:    clientVIP,
+		UDPAddr:    clientUDP,
+		Token:      token,
+		NATType:    clientNAT,
+		Candidates: clientCandidates,
 	}
 	data, _ := protocol.EncodeP2POffer(offer)
 	target.mu.Lock()
@@ -661,6 +668,9 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	target.mu.Lock()
 	targetUDP := target.udpAddr
 	targetVIP := target.virtualIP
+	targetNAT := target.natType
+	targetCandidates := make([]string, len(target.candidates))
+	copy(targetCandidates, target.candidates)
 	target.mu.Unlock()
 
 	if targetUDP == "" {
@@ -668,9 +678,11 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	}
 
 	resp := &protocol.P2PPunchResponse{
-		PeerVIP:  targetVIP,
-		PeerAddr: targetUDP,
-		Token:    token,
+		PeerVIP:    targetVIP,
+		PeerAddr:   targetUDP,
+		Token:      token,
+		NATType:    targetNAT,
+		Candidates: targetCandidates,
 	}
 	respData, _ := protocol.EncodeP2PPunchResponse(resp)
 	client.mu.Lock()
@@ -687,14 +699,17 @@ func (s *Server) handleP2POffer(client *Client, payload []byte) {
 		return
 	}
 
-	// Update client's known UDP address
+	// Update client's known UDP address, NAT type, and candidates.
 	client.mu.Lock()
 	oldUDP := client.udpAddr
 	client.udpAddr = offer.UDPAddr
+	client.natType = offer.NATType
+	client.candidates = make([]string, len(offer.Candidates))
+	copy(client.candidates, offer.Candidates)
 	client.mu.Unlock()
 
-	log.Printf("[Server-P2P] 收到P2POffer: 来自=%s (VIP=%s), UDP=%s",
-		client.username, client.virtualIP, offer.UDPAddr)
+	log.Printf("[Server-P2P] 收到P2POffer: 来自=%s (VIP=%s), UDP=%s, NAT=%d, 候选数=%d",
+		client.username, client.virtualIP, offer.UDPAddr, offer.NATType, len(offer.Candidates))
 	if oldUDP != "" && oldUDP != offer.UDPAddr {
 		log.Printf("[Server-P2P] 客户端 %s UDP地址已更新: %s → %s", client.username, oldUDP, offer.UDPAddr)
 	}
@@ -737,14 +752,17 @@ func (s *Server) handleP2PAnswer(client *Client, payload []byte) {
 		return
 	}
 
-	// Update client's known UDP address
+	// Update client's known UDP address, NAT type, and candidates.
 	client.mu.Lock()
 	oldUDP := client.udpAddr
 	client.udpAddr = answer.UDPAddr
+	client.natType = answer.NATType
+	client.candidates = make([]string, len(answer.Candidates))
+	copy(client.candidates, answer.Candidates)
 	client.mu.Unlock()
 
-	log.Printf("[Server-P2P] 收到P2PAnswer: 来自=%s (VIP=%s), UDP=%s, Accepted=%v",
-		client.username, client.virtualIP, answer.UDPAddr, answer.Accepted)
+	log.Printf("[Server-P2P] 收到P2PAnswer: 来自=%s (VIP=%s), UDP=%s, NAT=%d, 候选数=%d, Accepted=%v",
+		client.username, client.virtualIP, answer.UDPAddr, answer.NATType, len(answer.Candidates), answer.Accepted)
 	if oldUDP != "" && oldUDP != answer.UDPAddr {
 		log.Printf("[Server-P2P] 客户端 %s UDP地址已更新: %s → %s", client.username, oldUDP, answer.UDPAddr)
 	}

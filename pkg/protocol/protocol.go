@@ -147,25 +147,31 @@ type P2PPunchRequest struct {
 // P2PPunchResponse carries the public UDP endpoint discovered via STUN or
 // reported by the peer so both sides can attempt hole-punching.
 type P2PPunchResponse struct {
-	PeerVIP  net.IP // Virtual IP of the peer
-	PeerAddr string // Public UDP endpoint (ip:port) of the peer
-	Token    string // Opaque token to correlate punches
+	PeerVIP    net.IP   // Virtual IP of the peer
+	PeerAddr   string   // Public UDP endpoint (ip:port) of the peer
+	Token      string   // Opaque token to correlate punches
+	NATType    uint8    // Peer's NAT type (0=unknown, 1=cone, 2=symmetric)
+	Candidates []string // Additional candidate addresses
 }
 
 // P2POffer carries a UDP hole-punch offer from one peer to another (relayed
 // through the signaling server).
 type P2POffer struct {
-	FromVIP  net.IP
-	UDPAddr  string // sender's public UDP endpoint
-	Token    string
+	FromVIP    net.IP
+	UDPAddr    string   // sender's public UDP endpoint
+	Token      string
+	NATType    uint8    // Sender's NAT type (0=unknown, 1=cone, 2=symmetric)
+	Candidates []string // All candidate addresses (STUN reflexive + local)
 }
 
 // P2PAnswer carries a UDP hole-punch answer from the target peer.
 type P2PAnswer struct {
-	FromVIP  net.IP
-	UDPAddr  string
-	Token    string
-	Accepted bool
+	FromVIP    net.IP
+	UDPAddr    string
+	Token      string
+	Accepted   bool
+	NATType    uint8    // Responder's NAT type
+	Candidates []string // Responder's candidate addresses
 }
 
 // WriteMessage writes a framed message to the writer.
