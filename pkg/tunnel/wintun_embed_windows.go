@@ -34,7 +34,7 @@ func ensureWintunDLL() error {
 			return
 		}
 
-		if err := os.WriteFile(dst, wintunDLL, 0644); err != nil {
+		if err := os.WriteFile(dst, wintunDLL, 0600); err != nil {
 			extractErr = fmt.Errorf("extract wintun.dll to %s: %w", dst, err)
 			return
 		}
