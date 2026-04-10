@@ -226,6 +226,13 @@ func buildCandidateAddrs(primary *net.UDPAddr, candidates []string, peerNAT NATT
 	return addrs
 }
 
+// isValidPredictedPort checks if a port is in the valid range for NAT
+// predicted ports. We use 1024-65535 since NATs typically allocate from the
+// ephemeral port range, but some NATs may use registered ports (1024-49151).
+func isValidPredictedPort(port int) bool {
+	return port >= 1024 && port <= 65535
+}
+
 // appendPredictedPorts adds predicted port addresses for a Symmetric NAT peer.
 // It tries ports both above and below the primary port with delta=1, creating
 // a spread of candidate ports to catch the NAT's port allocation.
@@ -237,7 +244,7 @@ func appendPredictedPorts(addrs []*net.UDPAddr, primary *net.UDPAddr, seen map[s
 	for offset := 1; offset <= SymmetricPortSpread; offset++ {
 		for _, dir := range []int{1, -1} {
 			port := basePort + (offset * dir)
-			if port < 1024 || port > 65535 {
+			if !isValidPredictedPort(port) {
 				continue
 			}
 			addr := &net.UDPAddr{IP: primary.IP, Port: port}
@@ -371,13 +378,17 @@ func (m *Manager) punchHole(link *PeerLink) {
 				// Few candidates: send to all each tick.
 				for _, addr := range link.Candidates {
 					probeCount++
-					m.conn.WriteToUDP(probe, addr)
+					if _, err := m.conn.WriteToUDP(probe, addr); err != nil {
+						log.Printf("[P2P] 发送探测包失败 #%d → %s: %v", probeCount, addr, err)
+					}
 				}
 			} else {
 				// Many candidates: rotate through them in batches,
 				// always including the primary address.
 				probeCount++
-				m.conn.WriteToUDP(probe, link.PeerAddr)
+				if _, err := m.conn.WriteToUDP(probe, link.PeerAddr); err != nil {
+					log.Printf("[P2P] 发送探测包失败 #%d → %s (主地址): %v", probeCount, link.PeerAddr, err)
+				}
 
 				for i := 0; i < batchSize-1; i++ {
 					idx := candidateIdx % len(link.Candidates)
@@ -554,12 +565,12 @@ func PredictedPorts(lastPort, delta, count int) []int {
 	var ports []int
 	for i := 1; i <= count; i++ {
 		p := lastPort + (delta * i)
-		if p >= 1024 && p <= 65535 {
+		if isValidPredictedPort(p) {
 			ports = append(ports, p)
 		}
 		// Also try the negative direction.
 		p = lastPort - (delta * i)
-		if p >= 1024 && p <= 65535 {
+		if isValidPredictedPort(p) {
 			ports = append(ports, p)
 		}
 	}

@@ -93,7 +93,11 @@ func stunDetectNAT(conn *net.UDPConn) (*NATInfo, error) {
 			log.Printf("[STUN] 解析地址失败 %s: %v", addr, err)
 			continue
 		}
-		port, _ := strconv.Atoi(portStr)
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			log.Printf("[STUN] 解析端口失败 %s: %v", addr, err)
+			continue
+		}
 		results = append(results, stunResult{server: server, addr: addr, ip: host, port: port})
 		log.Printf("[STUN] 服务器 %s → 映射地址: %s", server, addr)
 
@@ -195,7 +199,8 @@ func gatherLocalCandidates(port int) []string {
 
 // mostCommonDelta returns the most representative port delta from a list.
 // If deltas are consistent, returns the common value. Otherwise returns the
-// average (clamped to [1, 100]).
+// average (clamped to [1, 100]). When port allocation appears random (delta
+// >100 or inconsistent), returns 1 to enable sequential spread probing.
 func mostCommonDelta(deltas []int) int {
 	if len(deltas) == 0 {
 		return 1
@@ -206,7 +211,7 @@ func mostCommonDelta(deltas []int) int {
 			return 1
 		}
 		if d > 100 {
-			return 1 // Random allocation, use delta=1 for spread probing
+			return 1 // Random allocation detected; use delta=1 for sequential spread probing
 		}
 		return d
 	}
@@ -233,7 +238,7 @@ func mostCommonDelta(deltas []int) int {
 		return 1
 	}
 	if avg > 100 {
-		return 1 // Likely random allocation
+		return 1 // Random allocation detected; use delta=1 for sequential spread probing
 	}
 	return avg
 }
