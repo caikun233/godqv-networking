@@ -265,8 +265,8 @@ func (s *Server) handleJoinRoom(client *Client, payload []byte) error {
 		return protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeJoinRoomResp, Payload: data})
 	}
 
-	// Allocate virtual IP
-	vip, err := room.Allocator.Allocate()
+	// Allocate virtual IP (reuses lease from previous session if available)
+	vip, err := room.Allocator.AllocateForUser(client.username)
 	if err != nil {
 		resp := &protocol.JoinRoomResponse{
 			Success: false,
@@ -379,7 +379,7 @@ func (s *Server) handleLeave(client *Client) {
 	room.mu.Unlock()
 
 	if vip != nil {
-		room.Allocator.Release(vip)
+		room.Allocator.ReleaseWithLease(vip, client.username)
 	}
 
 	log.Printf("[Server] 用户 %s 离开房间 %s", client.username, roomName)
