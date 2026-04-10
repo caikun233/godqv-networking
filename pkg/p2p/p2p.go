@@ -51,6 +51,7 @@ type PeerLink struct {
 	Candidates []*net.UDPAddr // All candidate addresses including predicted ports
 	PeerNAT    NATType        // Peer's NAT type
 	Active     bool
+	punching   bool // true while a punchHole goroutine is running
 }
 
 // Manager handles P2P UDP connections for the local client.
@@ -165,11 +166,17 @@ func (m *Manager) AddPeer(peerVIP net.IP, peerAddr string, candidates []string, 
 
 	vipStr := peerVIP.String()
 	m.mu.Lock()
-	// Check if we already have an active connection.
-	if existing, ok := m.links[vipStr]; ok && existing.Active {
-		m.mu.Unlock()
-		log.Printf("[P2P] 已有活跃连接到 %s, 跳过打洞", peerVIP)
-		return nil
+	if existing, ok := m.links[vipStr]; ok {
+		if existing.Active {
+			m.mu.Unlock()
+			log.Printf("[P2P] 已有活跃连接到 %s, 跳过打洞", peerVIP)
+			return nil
+		}
+		if existing.punching {
+			m.mu.Unlock()
+			log.Printf("[P2P] 已在打洞中: %s, 跳过重复请求", peerVIP)
+			return nil
+		}
 	}
 
 	// Build candidate list.
@@ -181,6 +188,7 @@ func (m *Manager) AddPeer(peerVIP net.IP, peerAddr string, candidates []string, 
 		Candidates: candidateAddrs,
 		PeerNAT:    peerNAT,
 		Active:     false,
+		punching:   true,
 	}
 	m.links[vipStr] = link
 	m.mu.Unlock()
@@ -295,6 +303,16 @@ func (m *Manager) GetActiveLink(vip net.IP) bool {
 // candidate addresses. For Symmetric NAT peers, this includes a range of
 // predicted ports based on observed port allocation patterns.
 func (m *Manager) punchHole(link *PeerLink) {
+	defer func() {
+		m.mu.Lock()
+		// Only clear punching if this link is still the current one.
+		vipStr := link.PeerVIP.String()
+		if current, ok := m.links[vipStr]; ok && current == link {
+			link.punching = false
+		}
+		m.mu.Unlock()
+	}()
+
 	log.Printf("[P2P] 开始打洞过程: 目标=%s (%s), 本地=%s (NAT=%s), 对端NAT=%s, 候选数=%d, 超时=%v",
 		link.PeerVIP, link.PeerAddr, m.localAddr, m.natInfo.Type, link.PeerNAT,
 		len(link.Candidates), PunchTimeout)
