@@ -16,7 +16,14 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/caikun233/godqv-networking/internal/client"
+	"github.com/caikun233/godqv-networking/pkg/p2p"
 	"github.com/caikun233/godqv-networking/pkg/tunnel"
+)
+
+const (
+	prefKeyServer   = "login_server"
+	prefKeyUsername = "login_username"
+	prefKeyPassword = "login_password"
 )
 
 // tunWrapper wraps a tunnel.Device for use as client.TunWriter.
@@ -30,6 +37,11 @@ func (tw *tunWrapper) WritePacket(packet []byte) error {
 }
 
 func main() {
+	// On Windows, attempt to self-elevate via UAC if not already running as
+	// administrator. This is important because creating TUN devices (wintun)
+	// requires admin privileges.
+	ensureElevated()
+
 	a := app.New()
 	w := a.NewWindow("神区互联 - GodQV Networking")
 	w.Resize(fyne.NewSize(520, 600))
@@ -53,15 +65,20 @@ type GUI struct {
 }
 
 func (g *GUI) showLoginScreen() {
-	// Form fields
+	// Form fields - restore saved values from preferences
+	prefs := g.app.Preferences()
+
 	serverEntry := widget.NewEntry()
 	serverEntry.SetPlaceHolder("服务器地址 (例如: example.com:9527)")
+	serverEntry.SetText(prefs.StringWithFallback(prefKeyServer, ""))
 
 	userEntry := widget.NewEntry()
 	userEntry.SetPlaceHolder("用户名")
+	userEntry.SetText(prefs.StringWithFallback(prefKeyUsername, ""))
 
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("密码 (留空表示无密码登录)")
+	passEntry.SetText(prefs.StringWithFallback(prefKeyPassword, ""))
 
 	statusLabel := widget.NewLabel("")
 	statusLabel.Wrapping = fyne.TextWrapWord
@@ -77,6 +94,11 @@ func (g *GUI) showLoginScreen() {
 			return
 		}
 
+		// Save login info to preferences
+		prefs.SetString(prefKeyServer, server)
+		prefs.SetString(prefKeyUsername, user)
+		prefs.SetString(prefKeyPassword, pass)
+
 		statusLabel.SetText("正在连接...")
 
 		go func() {
@@ -87,7 +109,9 @@ func (g *GUI) showLoginScreen() {
 			}
 			c := client.New(cfg)
 			if err := c.Connect(); err != nil {
-				statusLabel.SetText(fmt.Sprintf("连接失败: %v", err))
+				fyne.Do(func() {
+					statusLabel.SetText(fmt.Sprintf("连接失败: %v", err))
+				})
 				return
 			}
 
@@ -95,7 +119,9 @@ func (g *GUI) showLoginScreen() {
 			g.client = c
 			g.mu.Unlock()
 
-			g.showRoomScreen()
+			fyne.Do(func() {
+				g.showRoomScreen()
+			})
 		}()
 	})
 
@@ -115,10 +141,14 @@ func (g *GUI) showLoginScreen() {
 		go func() {
 			c := client.New(client.Config{})
 			if err := c.Register(server, user, pass); err != nil {
-				statusLabel.SetText(fmt.Sprintf("注册失败: %v", err))
+				fyne.Do(func() {
+					statusLabel.SetText(fmt.Sprintf("注册失败: %v", err))
+				})
 				return
 			}
-			statusLabel.SetText("注册成功！请登录")
+			fyne.Do(func() {
+				statusLabel.SetText("注册成功！请登录")
+			})
 		}()
 	})
 
@@ -144,7 +174,7 @@ func (g *GUI) showLoginScreen() {
 }
 
 func (g *GUI) showRoomScreen() {
-	statusLabel := widget.NewLabel("已连接，请选择或创建房间")
+	statusLabel := widget.NewLabel("已连接，请双击房间加入")
 	statusLabel.Wrapping = fyne.TextWrapWord
 
 	// Room list
@@ -157,57 +187,92 @@ func (g *GUI) showRoomScreen() {
 	)
 
 	var rooms []string
+	var roomsMu sync.Mutex
 
 	refreshRooms := func() {
 		roomInfos, err := g.client.ListRooms()
 		if err != nil {
-			statusLabel.SetText(fmt.Sprintf("获取房间列表失败: %v", err))
+			fyne.Do(func() {
+				statusLabel.SetText(fmt.Sprintf("获取房间列表失败: %v", err))
+			})
 			return
 		}
+		roomsMu.Lock()
 		rooms = make([]string, len(roomInfos))
 		for i, r := range roomInfos {
 			rooms[i] = r.Name
 		}
-		roomList.Length = func() int { return len(rooms) }
-		roomList.UpdateItem = func(id widget.ListItemID, obj fyne.CanvasObject) {
-			obj.(*widget.Label).SetText(rooms[id])
-		}
-		roomList.Refresh()
-	}
-
-	// Join room
-	roomPassEntry := widget.NewPasswordEntry()
-	roomPassEntry.SetPlaceHolder("房间密码")
-
-	var selectedRoom string
-	roomList.OnSelected = func(id widget.ListItemID) {
-		if id >= 0 && id < len(rooms) {
-			selectedRoom = rooms[id]
-		}
-	}
-
-	joinBtn := widget.NewButtonWithIcon("加入房间", theme.NavigateNextIcon(), func() {
-		if selectedRoom == "" {
-			statusLabel.SetText("请先选择一个房间")
-			return
-		}
-		pass := roomPassEntry.Text
-		statusLabel.SetText(fmt.Sprintf("正在加入房间 %s...", selectedRoom))
-
-		go func() {
-			g.client.SetConfig(client.Config{
-				ServerAddr: g.client.ServerAddr(),
-				Username:   g.client.Username(),
-				RoomName:   selectedRoom,
-				RoomPass:   pass,
-			})
-			if err := g.client.JoinRoom(); err != nil {
-				statusLabel.SetText(fmt.Sprintf("加入失败: %v", err))
-				return
+		roomsMu.Unlock()
+		fyne.Do(func() {
+			roomList.Length = func() int {
+				roomsMu.Lock()
+				defer roomsMu.Unlock()
+				return len(rooms)
 			}
-			g.showMainScreen()
-		}()
-	})
+			roomList.UpdateItem = func(id widget.ListItemID, obj fyne.CanvasObject) {
+				roomsMu.Lock()
+				defer roomsMu.Unlock()
+				if id < len(rooms) {
+					obj.(*widget.Label).SetText(rooms[id])
+				}
+			}
+			roomList.Refresh()
+		})
+	}
+
+	// Double-click room to join: show password dialog
+	joinRoom := func(roomName string) {
+		passEntry := widget.NewPasswordEntry()
+		passEntry.SetPlaceHolder("房间密码")
+
+		items := []*widget.FormItem{
+			widget.NewFormItem("密码", passEntry),
+		}
+
+		d := dialog.NewForm(
+			fmt.Sprintf("加入房间: %s", roomName),
+			"加入", "取消", items,
+			func(ok bool) {
+				if !ok {
+					return
+				}
+				pass := passEntry.Text
+				statusLabel.SetText(fmt.Sprintf("正在加入房间 %s...", roomName))
+
+				go func() {
+					g.client.SetConfig(client.Config{
+						ServerAddr: g.client.ServerAddr(),
+						Username:   g.client.Username(),
+						RoomName:   roomName,
+						RoomPass:   pass,
+					})
+					if err := g.client.JoinRoom(); err != nil {
+						fyne.Do(func() {
+							statusLabel.SetText(fmt.Sprintf("加入失败: %v", err))
+						})
+						return
+					}
+					fyne.Do(func() {
+						g.showMainScreen()
+					})
+				}()
+			}, g.window)
+		d.Resize(fyne.NewSize(400, 150))
+		d.Show()
+	}
+
+	roomList.OnSelected = func(id widget.ListItemID) {
+		roomsMu.Lock()
+		var name string
+		if id >= 0 && id < len(rooms) {
+			name = rooms[id]
+		}
+		roomsMu.Unlock()
+		roomList.UnselectAll()
+		if name != "" {
+			joinRoom(name)
+		}
+	}
 
 	// Create room
 	createBtn := widget.NewButton("创建新房间", func() {
@@ -226,9 +291,6 @@ func (g *GUI) showRoomScreen() {
 	)
 
 	bottom := container.NewVBox(
-		widget.NewLabel("房间密码:"),
-		roomPassEntry,
-		joinBtn,
 		statusLabel,
 	)
 
@@ -263,10 +325,14 @@ func (g *GUI) showCreateRoomDialog(statusLabel *widget.Label, onCreated func()) 
 
 		go func() {
 			if err := g.client.CreateRoom(name, pass); err != nil {
-				statusLabel.SetText(fmt.Sprintf("创建房间失败: %v", err))
+				fyne.Do(func() {
+					statusLabel.SetText(fmt.Sprintf("创建房间失败: %v", err))
+				})
 				return
 			}
-			statusLabel.SetText(fmt.Sprintf("房间 %s 创建成功", name))
+			fyne.Do(func() {
+				statusLabel.SetText(fmt.Sprintf("房间 %s 创建成功", name))
+			})
 			onCreated()
 		}()
 	}, g.window)
@@ -282,13 +348,13 @@ func (g *GUI) showMainScreen() {
 	statusLabel := widget.NewLabel("已连接")
 	statusLabel.Wrapping = fyne.TextWrapWord
 
+	p2pStatusLabel := widget.NewLabel("")
+	p2pStatusLabel.Wrapping = fyne.TextWrapWord
+
 	// Setup TUN device
 	var tunStatus string
-	if runtime.GOOS == "linux" || runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
-		tunName := "godqv0"
-		if runtime.GOOS == "windows" {
-			tunName = "GodQV Networking"
-		}
+	if runtime.GOOS == "windows" {
+		tunName := "GodQV Networking"
 		tunDev, err := tunnel.CreateTUN(tunnel.Config{
 			Name:    tunName,
 			Address: g.client.VirtualIP(),
@@ -323,9 +389,29 @@ func (g *GUI) showMainScreen() {
 
 	tunLabel := widget.NewLabel(tunStatus)
 
-	// Try to initialise P2P
+	// Set P2P event callback to report hole-punching status in GUI
+	g.client.SetP2PEventCallback(func(event p2p.Event) {
+		var msg string
+		switch event.Type {
+		case p2p.EventPunchStart:
+			msg = fmt.Sprintf("P2P: 正在与 %s 打洞...", event.PeerVIP)
+		case p2p.EventPunchSuccess:
+			msg = fmt.Sprintf("P2P: 与 %s 打洞成功! (UDP: %s)", event.PeerVIP, event.PeerAddr)
+		case p2p.EventPunchTimeout:
+			msg = fmt.Sprintf("P2P: 与 %s 打洞超时 (对方可能在对称NAT后, 将使用TCP中继)", event.PeerVIP)
+		}
+		if msg != "" {
+			fyne.Do(func() {
+				p2pStatusLabel.SetText(msg)
+			})
+		}
+	})
+
+	// Try to initialise P2P (after setting event callback)
+	var p2pInitErr string
 	if err := g.client.InitP2P(); err != nil {
-		log.Printf("P2P初始化失败: %v (将使用TCP中继)", err)
+		p2pInitErr = fmt.Sprintf("P2P初始化失败: %v (将使用TCP中继)", err)
+		log.Printf("%s", p2pInitErr)
 	}
 
 	// Peer list
@@ -363,7 +449,9 @@ func (g *GUI) showMainScreen() {
 		peerDataMu.Lock()
 		peerData = peers
 		peerDataMu.Unlock()
-		peerList.Refresh()
+		fyne.Do(func() {
+			peerList.Refresh()
+		})
 	})
 
 	// Start receiving
@@ -380,16 +468,23 @@ func (g *GUI) showMainScreen() {
 	})
 
 	// Info panel
-	info := container.NewVBox(
+	infoItems := []fyne.CanvasObject{
 		widget.NewRichTextFromMarkdown("## 神区互联 - 已连接"),
 		widget.NewSeparator(),
 		vipLabel,
 		subnetLabel,
 		tunLabel,
 		statusLabel,
+	}
+	if p2pInitErr != "" {
+		infoItems = append(infoItems, widget.NewLabel(p2pInitErr))
+	}
+	infoItems = append(infoItems, p2pStatusLabel)
+	infoItems = append(infoItems,
 		widget.NewSeparator(),
 		widget.NewLabel("在线节点:"),
 	)
+	info := container.NewVBox(infoItems...)
 
 	bottom := container.NewVBox(
 		widget.NewSeparator(),
@@ -402,6 +497,8 @@ func (g *GUI) showMainScreen() {
 	// Monitor connection
 	go func() {
 		<-g.client.Done()
-		statusLabel.SetText("连接已断开")
+		fyne.Do(func() {
+			statusLabel.SetText("连接已断开")
+		})
 	}()
 }

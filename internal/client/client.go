@@ -44,7 +44,8 @@ type Client struct {
 	mu        sync.Mutex
 	done      chan struct{}
 	closeOnce sync.Once
-	onPeerUpdate func([]PeerInfo)
+	onPeerUpdate  func([]PeerInfo)
+	onP2PEvent    func(p2p.Event)
 }
 
 // TunWriter is an interface for writing packets to the TUN device.
@@ -83,6 +84,11 @@ func (c *Client) SetTunWriter(tw TunWriter) {
 // SetPeerUpdateCallback sets a callback for peer updates.
 func (c *Client) SetPeerUpdateCallback(cb func([]PeerInfo)) {
 	c.onPeerUpdate = cb
+}
+
+// SetP2PEventCallback sets a callback for P2P hole-punching events.
+func (c *Client) SetP2PEventCallback(cb func(p2p.Event)) {
+	c.onP2PEvent = cb
 }
 
 // Connect connects to the server and authenticates.
@@ -319,6 +325,11 @@ func (c *Client) InitP2P() error {
 		return fmt.Errorf("init P2P: %w", err)
 	}
 	c.p2pMgr = mgr
+
+	// Wire P2P event callback if set.
+	if c.onP2PEvent != nil {
+		mgr.SetEventCallback(c.onP2PEvent)
+	}
 
 	// Report our public UDP address to the server via a P2POffer so the
 	// server knows where to direct other peers.

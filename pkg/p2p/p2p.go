@@ -49,6 +49,7 @@ type Manager struct {
 
 	links    map[string]*PeerLink // peerVIP string -> link
 	onPacket func(packet []byte)  // callback for received data packets
+	onEvent  func(Event)          // optional callback for P2P events
 
 	done     chan struct{}
 	closeOnce sync.Once
@@ -97,6 +98,23 @@ func (m *Manager) Close() error {
 		err = m.conn.Close()
 	})
 	return err
+}
+
+// SetEventCallback sets an optional callback that is invoked for P2P events
+// such as punch start, success, and timeout.
+func (m *Manager) SetEventCallback(cb func(Event)) {
+	m.mu.Lock()
+	m.onEvent = cb
+	m.mu.Unlock()
+}
+
+func (m *Manager) emitEvent(evt Event) {
+	m.mu.RLock()
+	cb := m.onEvent
+	m.mu.RUnlock()
+	if cb != nil {
+		cb(evt)
+	}
 }
 
 // AddPeer begins hole-punching to the given peer. peerAddr is the peer's
@@ -153,6 +171,8 @@ func (m *Manager) GetActiveLink(vip net.IP) bool {
 
 // punchHole attempts to establish a direct UDP link by repeatedly sending probes.
 func (m *Manager) punchHole(link *PeerLink) {
+	m.emitEvent(Event{Type: EventPunchStart, PeerVIP: link.PeerVIP, PeerAddr: link.PeerAddr.String()})
+
 	deadline := time.After(PunchTimeout)
 	ticker := time.NewTicker(ProbeInterval)
 	defer ticker.Stop()
@@ -166,6 +186,7 @@ func (m *Manager) punchHole(link *PeerLink) {
 		case <-deadline:
 			if !link.Active {
 				log.Printf("[P2P] 打洞超时: %s", link.PeerVIP)
+				m.emitEvent(Event{Type: EventPunchTimeout, PeerVIP: link.PeerVIP, PeerAddr: link.PeerAddr.String()})
 			}
 			return
 		case <-ticker.C:
@@ -220,15 +241,22 @@ func (m *Manager) readLoop() {
 }
 
 func (m *Manager) handleProbe(addr *net.UDPAddr) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	var evt *Event
 
+	m.mu.Lock()
 	// Find which link this probe belongs to (match by addr)
 	for _, link := range m.links {
 		if link.PeerAddr.IP.Equal(addr.IP) && link.PeerAddr.Port == addr.Port {
 			if !link.Active {
 				link.Active = true
 				log.Printf("[P2P] 打洞成功! 与 %s 建立直连 (UDP: %s)", link.PeerVIP, addr)
+				vip := make(net.IP, len(link.PeerVIP))
+				copy(vip, link.PeerVIP)
+				evt = &Event{Type: EventPunchSuccess, PeerVIP: vip, PeerAddr: addr.String()}
+			}
+			m.mu.Unlock()
+			if evt != nil {
+				m.emitEvent(*evt)
 			}
 			return
 		}
@@ -240,9 +268,17 @@ func (m *Manager) handleProbe(addr *net.UDPAddr) {
 			link.PeerAddr = addr
 			link.Active = true
 			log.Printf("[P2P] 打洞成功! 与 %s 建立直连 (UDP: %s, 端口已更新)", link.PeerVIP, addr)
+			vip := make(net.IP, len(link.PeerVIP))
+			copy(vip, link.PeerVIP)
+			evt = &Event{Type: EventPunchSuccess, PeerVIP: vip, PeerAddr: addr.String()}
+			m.mu.Unlock()
+			if evt != nil {
+				m.emitEvent(*evt)
+			}
 			return
 		}
 	}
+	m.mu.Unlock()
 }
 
 func isProbe(data []byte) bool {
