@@ -1,4 +1,4 @@
-.PHONY: all build test clean server client
+.PHONY: all build test clean server client gui
 
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -15,6 +15,9 @@ server:
 
 client:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o dist/godqv-client ./cmd/client/
+
+gui:
+	go build -ldflags="$(LDFLAGS)" -o dist/godqv-gui ./cmd/gui/
 
 clean:
 	rm -rf dist/

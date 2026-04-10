@@ -25,6 +25,11 @@ var (
 	roomPass   = flag.String("roompass", "", "房间密码")
 	genConfig  = flag.Bool("genconfig", false, "生成示例配置文件")
 	noTun      = flag.Bool("notun", false, "不创建TUN设备 (仅测试连接)")
+	noP2P      = flag.Bool("nop2p", false, "禁用P2P直连 (仅使用TCP中继)")
+	register   = flag.Bool("register", false, "注册新用户 (配合 -server -user -pass 使用)")
+	createRoom = flag.String("createroom", "", "创建新房间 (指定房间名称)")
+	createPass = flag.String("createpass", "", "创建房间时的密码")
+	listRooms  = flag.Bool("listrooms", false, "列出可用房间")
 )
 
 // tunWrapper wraps a tunnel.Device for use as client.TunWriter.
@@ -50,6 +55,19 @@ func main() {
 		return
 	}
 
+	// Handle registration (no config file needed)
+	if *register {
+		if *serverAddr == "" || *username == "" {
+			log.Fatalf("注册需要指定 -server 和 -user 参数")
+		}
+		c := client.New(client.Config{})
+		if err := c.Register(*serverAddr, *username, *password); err != nil {
+			log.Fatalf("注册失败: %v", err)
+		}
+		fmt.Println("注册成功！请使用登录命令连接")
+		return
+	}
+
 	cfg := loadConfig()
 
 	// Create and connect client
@@ -59,6 +77,35 @@ func main() {
 		log.Fatalf("连接失败，请检查服务器地址和用户凭据")
 	}
 	defer c.Close()
+
+	// Handle list rooms
+	if *listRooms {
+		rooms, err := c.ListRooms()
+		if err != nil {
+			log.Fatalf("获取房间列表失败: %v", err)
+		}
+		fmt.Printf("\n可用房间 (%d):\n", len(rooms))
+		for _, r := range rooms {
+			creator := r.CreatedBy
+			if creator == "" {
+				creator = "系统"
+			}
+			fmt.Printf("  - %s (创建者: %s)\n", r.Name, creator)
+		}
+		return
+	}
+
+	// Handle create room
+	if *createRoom != "" {
+		if *createPass == "" {
+			log.Fatalf("创建房间需要指定 -createpass 参数")
+		}
+		if err := c.CreateRoom(*createRoom, *createPass); err != nil {
+			log.Fatalf("创建房间失败: %v", err)
+		}
+		fmt.Printf("房间 %s 创建成功\n", *createRoom)
+		return
+	}
 
 	// Join room
 	if err := c.JoinRoom(); err != nil {
@@ -114,6 +161,13 @@ func main() {
 		log.Println("以无TUN模式运行 (仅测试连接)")
 	}
 
+	// Initialise P2P unless disabled
+	if !*noP2P {
+		if err := c.InitP2P(); err != nil {
+			log.Printf("P2P初始化失败: %v (将使用TCP中继)", err)
+		}
+	}
+
 	// Start receiving
 	c.StartReceiving()
 
@@ -145,6 +199,7 @@ func printStatus(c *client.Client, tunDev tunnel.Device) {
 	}
 	fmt.Println("├─────────────────────────────────────┤")
 	fmt.Println("│ 命令: peers - 查看在线节点           │")
+	fmt.Println("│       rooms - 列出可用房间           │")
 	fmt.Println("│       quit  - 退出                   │")
 	fmt.Println("└─────────────────────────────────────┘")
 }
@@ -162,7 +217,21 @@ func interactiveLoop(c *client.Client) {
 				if !p.Online {
 					status = "离线"
 				}
-				fmt.Printf("  %s - %s [%s]\n", p.Username, p.VirtualIP, status)
+				mode := "TCP中继"
+				if p.P2P {
+					mode = "P2P直连"
+				}
+				fmt.Printf("  %s - %s [%s] (%s)\n", p.Username, p.VirtualIP, status, mode)
+			}
+		case "rooms":
+			rooms, err := c.ListRooms()
+			if err != nil {
+				fmt.Printf("获取房间列表失败: %v\n", err)
+				continue
+			}
+			fmt.Printf("\n可用房间 (%d):\n", len(rooms))
+			for _, r := range rooms {
+				fmt.Printf("  - %s\n", r.Name)
 			}
 		case "quit", "exit":
 			fmt.Println("正在退出...")
@@ -171,7 +240,7 @@ func interactiveLoop(c *client.Client) {
 		case "":
 			// ignore
 		default:
-			fmt.Println("未知命令。可用命令: peers, quit")
+			fmt.Println("未知命令。可用命令: peers, rooms, quit")
 		}
 	}
 }

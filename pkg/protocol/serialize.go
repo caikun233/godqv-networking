@@ -292,3 +292,271 @@ func DecodeErrorMsg(data []byte) (*ErrorMsg, error) {
 	}
 	return &ErrorMsg{Code: code, Message: message}, nil
 }
+
+// EncodeRegisterRequest serializes a RegisterRequest.
+func EncodeRegisterRequest(req *RegisterRequest) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeString(&buf, req.Username); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, req.Password); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeRegisterRequest deserializes a RegisterRequest.
+func DecodeRegisterRequest(data []byte) (*RegisterRequest, error) {
+	r := bytes.NewReader(data)
+	username, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	password, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	return &RegisterRequest{Username: username, Password: password}, nil
+}
+
+// EncodeRegisterResponse serializes a RegisterResponse.
+func EncodeRegisterResponse(resp *RegisterResponse) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeBool(&buf, resp.Success); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, resp.Message); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeRegisterResponse deserializes a RegisterResponse.
+func DecodeRegisterResponse(data []byte) (*RegisterResponse, error) {
+	r := bytes.NewReader(data)
+	success, err := readBool(r)
+	if err != nil {
+		return nil, err
+	}
+	message, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	return &RegisterResponse{Success: success, Message: message}, nil
+}
+
+// EncodeCreateRoomRequest serializes a CreateRoomRequest.
+func EncodeCreateRoomRequest(req *CreateRoomRequest) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeString(&buf, req.RoomName); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, req.Password); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeCreateRoomRequest deserializes a CreateRoomRequest.
+func DecodeCreateRoomRequest(data []byte) (*CreateRoomRequest, error) {
+	r := bytes.NewReader(data)
+	name, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	password, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	return &CreateRoomRequest{RoomName: name, Password: password}, nil
+}
+
+// EncodeCreateRoomResponse serializes a CreateRoomResponse.
+func EncodeCreateRoomResponse(resp *CreateRoomResponse) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeBool(&buf, resp.Success); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, resp.Message); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeCreateRoomResponse deserializes a CreateRoomResponse.
+func DecodeCreateRoomResponse(data []byte) (*CreateRoomResponse, error) {
+	r := bytes.NewReader(data)
+	success, err := readBool(r)
+	if err != nil {
+		return nil, err
+	}
+	message, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	return &CreateRoomResponse{Success: success, Message: message}, nil
+}
+
+// EncodeListRoomsResponse serializes a ListRoomsResponse.
+func EncodeListRoomsResponse(resp *ListRoomsResponse) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.BigEndian, uint16(len(resp.Rooms))); err != nil {
+		return nil, err
+	}
+	for _, r := range resp.Rooms {
+		if err := writeString(&buf, r.Name); err != nil {
+			return nil, err
+		}
+		if err := writeString(&buf, r.CreatedBy); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeListRoomsResponse deserializes a ListRoomsResponse.
+func DecodeListRoomsResponse(data []byte) (*ListRoomsResponse, error) {
+	r := bytes.NewReader(data)
+	var count uint16
+	if err := binary.Read(r, binary.BigEndian, &count); err != nil {
+		return nil, err
+	}
+	rooms := make([]RoomInfo, count)
+	for i := range rooms {
+		name, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		createdBy, err := readString(r)
+		if err != nil {
+			return nil, err
+		}
+		rooms[i] = RoomInfo{Name: name, CreatedBy: createdBy}
+	}
+	return &ListRoomsResponse{Rooms: rooms}, nil
+}
+
+// EncodeP2PPunchRequest serializes a P2PPunchRequest.
+func EncodeP2PPunchRequest(req *P2PPunchRequest) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeIP(&buf, req.TargetVIP); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeP2PPunchRequest deserializes a P2PPunchRequest.
+func DecodeP2PPunchRequest(data []byte) (*P2PPunchRequest, error) {
+	r := bytes.NewReader(data)
+	ip, err := readIP(r)
+	if err != nil {
+		return nil, err
+	}
+	return &P2PPunchRequest{TargetVIP: ip}, nil
+}
+
+// EncodeP2PPunchResponse serializes a P2PPunchResponse.
+func EncodeP2PPunchResponse(resp *P2PPunchResponse) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeIP(&buf, resp.PeerVIP); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, resp.PeerAddr); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, resp.Token); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeP2PPunchResponse deserializes a P2PPunchResponse.
+func DecodeP2PPunchResponse(data []byte) (*P2PPunchResponse, error) {
+	r := bytes.NewReader(data)
+	ip, err := readIP(r)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	token, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	return &P2PPunchResponse{PeerVIP: ip, PeerAddr: addr, Token: token}, nil
+}
+
+// EncodeP2POffer serializes a P2POffer.
+func EncodeP2POffer(offer *P2POffer) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeIP(&buf, offer.FromVIP); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, offer.UDPAddr); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, offer.Token); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeP2POffer deserializes a P2POffer.
+func DecodeP2POffer(data []byte) (*P2POffer, error) {
+	r := bytes.NewReader(data)
+	ip, err := readIP(r)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	token, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	return &P2POffer{FromVIP: ip, UDPAddr: addr, Token: token}, nil
+}
+
+// EncodeP2PAnswer serializes a P2PAnswer.
+func EncodeP2PAnswer(answer *P2PAnswer) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := writeIP(&buf, answer.FromVIP); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, answer.UDPAddr); err != nil {
+		return nil, err
+	}
+	if err := writeString(&buf, answer.Token); err != nil {
+		return nil, err
+	}
+	if err := writeBool(&buf, answer.Accepted); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// DecodeP2PAnswer deserializes a P2PAnswer.
+func DecodeP2PAnswer(data []byte) (*P2PAnswer, error) {
+	r := bytes.NewReader(data)
+	ip, err := readIP(r)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	token, err := readString(r)
+	if err != nil {
+		return nil, err
+	}
+	accepted, err := readBool(r)
+	if err != nil {
+		return nil, err
+	}
+	return &P2PAnswer{FromVIP: ip, UDPAddr: addr, Token: token, Accepted: accepted}, nil
+}
