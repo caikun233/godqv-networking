@@ -51,6 +51,9 @@ type Manager struct {
 	onPacket func(packet []byte)  // callback for received data packets
 	onEvent  func(Event)          // optional callback for P2P events
 
+	unmatchedProbeCount int       // rate-limit logging of unmatched probes
+	lastUnmatchedLog    time.Time // last time we logged unmatched probe details
+
 	done      chan struct{}
 	closeOnce sync.Once
 }
@@ -193,9 +196,10 @@ func (m *Manager) punchHole(link *PeerLink) {
 		link.PeerVIP, link.PeerAddr, m.localAddr, PunchTimeout)
 
 	// Detect potential hairpin NAT scenario (same public IP)
-	localHost, _, _ := net.SplitHostPort(m.localAddr)
-	peerHost, _, _ := net.SplitHostPort(link.PeerAddr.String())
-	if localHost == peerHost {
+	localHost, _, localErr := net.SplitHostPort(m.localAddr)
+	peerHost, _, peerErr := net.SplitHostPort(link.PeerAddr.String())
+	samePublicIP := localErr == nil && peerErr == nil && localHost == peerHost
+	if samePublicIP {
 		log.Printf("[P2P] ⚠ 警告: 本地和对端公网IP相同 (%s), 两端可能在同一NAT后面。"+
 			"如果路由器不支持 Hairpin NAT (NAT Loopback), UDP打洞将失败。"+
 			"建议: 检查路由器是否开启NAT回环/Hairpin NAT功能。", localHost)
@@ -224,7 +228,7 @@ func (m *Manager) punchHole(link *PeerLink) {
 				log.Printf("[P2P]   对端地址: %s", link.PeerAddr)
 				log.Printf("[P2P]   发送探测包: %d 个", probeCount)
 				log.Printf("[P2P]   超时时间: %v", PunchTimeout)
-				if localHost == peerHost {
+				if samePublicIP {
 					log.Printf("[P2P]   ⚠ 检测到相同公网IP: 可能是 Hairpin NAT 问题")
 				}
 				log.Printf("[P2P]   可能原因:")
@@ -348,12 +352,15 @@ func (m *Manager) handleProbe(addr *net.UDPAddr) {
 		}
 	}
 
-	// Log unmatched probe
-	log.Printf("[P2P] 收到未匹配的探测包: 来源=%s (没有对应的已知对端)", addr)
-	if len(m.links) > 0 {
+	// Log unmatched probe (rate-limited to avoid flooding)
+	m.unmatchedProbeCount++
+	if time.Since(m.lastUnmatchedLog) >= 5*time.Second {
+		log.Printf("[P2P] 收到未匹配的探测包: 来源=%s (累计 %d 个未匹配, 已知对端: %d 个)",
+			addr, m.unmatchedProbeCount, len(m.links))
 		for vip, link := range m.links {
 			log.Printf("[P2P]   已知对端: VIP=%s, 地址=%s, 活跃=%v", vip, link.PeerAddr, link.Active)
 		}
+		m.lastUnmatchedLog = time.Now()
 	}
 	m.mu.Unlock()
 }

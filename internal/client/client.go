@@ -345,9 +345,9 @@ func (c *Client) InitP2P() error {
 	c.mu.Unlock()
 	if err != nil {
 		log.Printf("[P2P] 发送P2POffer到服务器失败: %v", err)
-	} else {
-		log.Printf("[P2P] P2P初始化完成, 等待对端信令消息...")
+		return fmt.Errorf("send P2P offer: %w", err)
 	}
+	log.Printf("[P2P] P2P初始化完成, 等待对端信令消息...")
 
 	return nil
 }
