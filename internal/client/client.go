@@ -315,6 +315,7 @@ func (c *Client) JoinRoom() error {
 // InitP2P initialises the P2P UDP manager. Call after JoinRoom and setting
 // the TUN writer, before StartReceiving.
 func (c *Client) InitP2P() error {
+	log.Printf("[P2P] 正在初始化P2P管理器...")
 	mgr, err := p2p.NewManager(func(packet []byte) {
 		// Data received directly via P2P – write to TUN.
 		if c.tunWriter != nil {
@@ -333,14 +334,20 @@ func (c *Client) InitP2P() error {
 
 	// Report our public UDP address to the server via a P2POffer so the
 	// server knows where to direct other peers.
+	log.Printf("[P2P] 向服务器报告本地公网UDP地址: %s (VIP=%s)", mgr.LocalAddr(), c.virtualIP)
 	offer := &protocol.P2POffer{
 		FromVIP: c.virtualIP,
 		UDPAddr: mgr.LocalAddr(),
 	}
 	data, _ := protocol.EncodeP2POffer(offer)
 	c.mu.Lock()
-	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2POffer, Payload: data})
+	err = protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2POffer, Payload: data})
 	c.mu.Unlock()
+	if err != nil {
+		log.Printf("[P2P] 发送P2POffer到服务器失败: %v", err)
+		return fmt.Errorf("send P2P offer: %w", err)
+	}
+	log.Printf("[P2P] P2P初始化完成, 等待对端信令消息...")
 
 	return nil
 }
@@ -385,6 +392,7 @@ func (c *Client) SendPacket(packet []byte) error {
 
 // StartReceiving starts the message receiving loop.
 func (c *Client) StartReceiving() {
+	log.Printf("[Client] 开始接收消息循环")
 	go c.receiveLoop()
 	go c.keepaliveLoop()
 }
@@ -500,27 +508,41 @@ func (c *Client) receiveLoop() {
 
 		case protocol.MsgTypeP2PAnswer:
 			c.handleP2PAnswer(msg.Payload)
+
+		default:
+			log.Printf("[Client] 收到未知消息类型: 0x%02x, 载荷大小=%d字节", msg.Type, len(msg.Payload))
 		}
 	}
 }
 
 func (c *Client) requestP2PPunch(targetVIP net.IP) {
+	log.Printf("[P2P] 发送打洞请求: 目标VIP=%s", targetVIP)
 	req := &protocol.P2PPunchRequest{TargetVIP: targetVIP}
 	data, _ := protocol.EncodeP2PPunchRequest(req)
 	c.mu.Lock()
-	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PPunchReq, Payload: data})
+	err := protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PPunchReq, Payload: data})
 	c.mu.Unlock()
+	if err != nil {
+		log.Printf("[P2P] 发送打洞请求失败: 目标VIP=%s, 错误=%v", targetVIP, err)
+	}
 }
 
 func (c *Client) handleP2POffer(payload []byte) {
 	offer, err := protocol.DecodeP2POffer(payload)
 	if err != nil {
+		log.Printf("[P2P] 解码P2POffer失败: %v", err)
 		return
 	}
-	if c.p2pMgr == nil || offer.UDPAddr == "" {
+	if c.p2pMgr == nil {
+		log.Printf("[P2P] 收到P2POffer但P2P管理器未初始化, 忽略: FromVIP=%s, UDPAddr=%s", offer.FromVIP, offer.UDPAddr)
 		return
 	}
-	log.Printf("[P2P] 收到打洞请求: %s → %s", offer.FromVIP, offer.UDPAddr)
+	if offer.UDPAddr == "" {
+		log.Printf("[P2P] 收到P2POffer但对端无UDP地址: FromVIP=%s", offer.FromVIP)
+		return
+	}
+	log.Printf("[P2P] 收到打洞请求: 来自=%s, 对端UDP=%s, Token=%s", offer.FromVIP, offer.UDPAddr, offer.Token)
+	log.Printf("[P2P]   本地UDP地址=%s, 准备添加对端并发送应答", c.p2pMgr.LocalAddr())
 	c.p2pMgr.AddPeer(offer.FromVIP, offer.UDPAddr)
 
 	// Send answer back
@@ -534,29 +556,47 @@ func (c *Client) handleP2POffer(payload []byte) {
 	c.mu.Lock()
 	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PAnswer, Payload: data})
 	c.mu.Unlock()
+	log.Printf("[P2P] 已发送P2PAnswer: 本地VIP=%s, 本地UDP=%s, Token=%s", c.virtualIP, c.p2pMgr.LocalAddr(), offer.Token)
 }
 
 func (c *Client) handleP2PPunchResp(payload []byte) {
 	resp, err := protocol.DecodeP2PPunchResponse(payload)
 	if err != nil {
+		log.Printf("[P2P] 解码P2PPunchResponse失败: %v", err)
 		return
 	}
-	if c.p2pMgr == nil || resp.PeerAddr == "" {
+	if c.p2pMgr == nil {
+		log.Printf("[P2P] 收到P2PPunchResp但P2P管理器未初始化: PeerVIP=%s, PeerAddr=%s", resp.PeerVIP, resp.PeerAddr)
 		return
 	}
-	log.Printf("[P2P] 收到打洞响应: %s → %s", resp.PeerVIP, resp.PeerAddr)
+	if resp.PeerAddr == "" {
+		log.Printf("[P2P] 收到P2PPunchResp但对端无UDP地址: PeerVIP=%s (对端可能未初始化P2P)", resp.PeerVIP)
+		return
+	}
+	log.Printf("[P2P] 收到打洞响应: 对端VIP=%s, 对端UDP=%s, Token=%s", resp.PeerVIP, resp.PeerAddr, resp.Token)
 	c.p2pMgr.AddPeer(resp.PeerVIP, resp.PeerAddr)
 }
 
 func (c *Client) handleP2PAnswer(payload []byte) {
 	answer, err := protocol.DecodeP2PAnswer(payload)
 	if err != nil {
+		log.Printf("[P2P] 解码P2PAnswer失败: %v", err)
 		return
 	}
-	if c.p2pMgr == nil || answer.UDPAddr == "" || !answer.Accepted {
+	if c.p2pMgr == nil {
+		log.Printf("[P2P] 收到P2PAnswer但P2P管理器未初始化: FromVIP=%s", answer.FromVIP)
 		return
 	}
-	log.Printf("[P2P] 收到打洞应答: %s → %s", answer.FromVIP, answer.UDPAddr)
+	if answer.UDPAddr == "" {
+		log.Printf("[P2P] 收到P2PAnswer但对端无UDP地址: FromVIP=%s, Accepted=%v", answer.FromVIP, answer.Accepted)
+		return
+	}
+	if !answer.Accepted {
+		log.Printf("[P2P] 对端拒绝P2P连接: FromVIP=%s, UDPAddr=%s", answer.FromVIP, answer.UDPAddr)
+		return
+	}
+	log.Printf("[P2P] 收到打洞应答: 对端VIP=%s, 对端UDP=%s, Token=%s, Accepted=%v",
+		answer.FromVIP, answer.UDPAddr, answer.Token, answer.Accepted)
 	c.p2pMgr.AddPeer(answer.FromVIP, answer.UDPAddr)
 }
 
