@@ -11,15 +11,15 @@ import (
 )
 
 var (
-	kernel32     = syscall.NewLazyDLL("kernel32.dll")
+	kernel32         = syscall.NewLazyDLL("kernel32.dll")
 	procAllocConsole = kernel32.NewProc("AllocConsole")
 )
 
 // attachConsole allocates a Windows console for this process so that log
-// output written to os.Stdout/os.Stderr is visible to the user even when the
-// binary was linked with -H windowsgui.  If a console already exists (e.g.
-// the binary was launched from an existing cmd.exe window) AllocConsole fails
-// silently and the existing console is kept.
+// output written to os.Stdout/os.Stderr is visible to the user.  If a console
+// already exists (e.g. launched from cmd.exe) AllocConsole fails silently and
+// the existing console is kept.  The console is intentionally shown so the
+// user can watch detailed diagnostic logs (e.g. for UDP hole-punching).
 func attachConsole() {
 	procAllocConsole.Call() // no-op if already attached
 

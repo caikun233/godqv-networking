@@ -43,7 +43,7 @@ func (tw *tunWrapper) WritePacket(packet []byte) error {
 type memLogger struct {
 	mu      sync.Mutex
 	lines   []string
-	logData binding.StringList
+	logData binding.StringList // nil until InitBinding() is called
 }
 
 func (l *memLogger) Write(p []byte) (n int, err error) {
@@ -56,13 +56,31 @@ func (l *memLogger) Write(p []byte) (n int, err error) {
 	if len(l.lines) > 1000 {
 		l.lines = l.lines[len(l.lines)-1000:]
 	}
+	logData := l.logData
+	var snapshot []string
+	if logData != nil {
+		snapshot = make([]string, len(l.lines))
+		copy(snapshot, l.lines)
+	}
+	l.mu.Unlock()
+
+	if logData != nil {
+		// Update binding – Fyne binding is thread-safe and auto-notifies the list.
+		_ = logData.Set(snapshot)
+	}
+	return len(p), nil
+}
+
+// InitBinding creates the Fyne data binding and syncs all accumulated log
+// lines into it.  Must be called after the Fyne app has been created so that
+// the binding infrastructure is ready.
+func (l *memLogger) InitBinding() {
+	l.mu.Lock()
+	l.logData = binding.NewStringList()
 	snapshot := make([]string, len(l.lines))
 	copy(snapshot, l.lines)
 	l.mu.Unlock()
-
-	// Update binding – Fyne binding is thread-safe and auto-notifies the list.
 	_ = l.logData.Set(snapshot)
-	return len(p), nil
 }
 
 func (l *memLogger) Lines() []string {
@@ -73,9 +91,7 @@ func (l *memLogger) Lines() []string {
 	return result
 }
 
-var globalLogger = &memLogger{
-	logData: binding.NewStringList(),
-}
+var globalLogger = &memLogger{}
 
 // openLogFile creates (or opens for append) the log file in the user config directory.
 // Returns the file, its path, and any error.
@@ -97,14 +113,15 @@ func openLogFile() (*os.File, string, error) {
 }
 
 func main() {
-	// On Windows, attach a console window so that all log output is visible to
-	// the user.  This works both when the binary is built without -H windowsgui
-	// (the console already exists) and when it is built with -H windowsgui
-	// (AllocConsole creates a new console window and stdout/stderr are
-	// redirected to it).
+	// On Windows, allocate a console window so that all log output is visible
+	// to the user for diagnostics (e.g. UDP hole-punching debugging).
 	attachConsole()
 
-	// Setup custom logger to capture logs in GUI
+	// Setup logger: write to the log file and the in-memory logger (which
+	// feeds the in-app log viewer once the Fyne app is initialised).
+	// Note: globalLogger buffers lines in a plain slice until InitBinding()
+	// is called after app.New(), avoiding Fyne API calls before the driver
+	// is ready.
 	writers := []io.Writer{os.Stdout, globalLogger}
 	logFile, logFilePath, err := openLogFile()
 	if err == nil {
@@ -131,6 +148,7 @@ func main() {
 
 	log.Printf("[启动] 正在初始化 Fyne GUI 框架...")
 	a := app.New()
+	globalLogger.InitBinding()
 	log.Printf("[启动] Fyne app 创建成功")
 	a.SetIcon(AppIcon)
 	w := a.NewWindow("神区互联 - GodQV Networking")
