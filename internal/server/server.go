@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -12,14 +13,16 @@ import (
 
 	"github.com/caikun233/godqv-networking/pkg/network"
 	"github.com/caikun233/godqv-networking/pkg/protocol"
+	"github.com/caikun233/godqv-networking/pkg/store"
 )
 
 // Config holds server configuration.
 type Config struct {
 	ListenAddr  string            `json:"listen_addr"`
 	SubnetCIDR  string            `json:"subnet_cidr"` // Base subnet for rooms
-	Users       map[string]string `json:"users"`        // username -> password
-	RoomConfigs map[string]RoomConfig `json:"rooms"`    // room name -> config
+	Users       map[string]string `json:"users"`        // Legacy: username -> password (used when DB is nil)
+	RoomConfigs map[string]RoomConfig `json:"rooms"`    // Legacy: room name -> config (used when DB is nil)
+	Database    *store.Config     `json:"database"`     // PostgreSQL configuration (optional)
 }
 
 // RoomConfig holds per-room configuration.
@@ -35,6 +38,7 @@ type Client struct {
 	token     string
 	virtualIP net.IP
 	roomName  string
+	udpAddr   string // public UDP endpoint for P2P
 	mu        sync.Mutex
 	lastPing  time.Time
 }
@@ -42,7 +46,7 @@ type Client struct {
 // Room represents a virtual network room.
 type Room struct {
 	Name      string
-	Password  string
+	Password  string // used only for legacy (non-DB) mode
 	Allocator *network.IPAllocator
 	Clients   map[string]*Client // virtualIP -> client
 	mu        sync.RWMutex
@@ -51,6 +55,7 @@ type Room struct {
 // Server is the main server struct.
 type Server struct {
 	config  Config
+	store   *store.Store // nil when running without database
 	rooms   map[string]*Room
 	clients map[string]*Client // token -> client
 	mu      sync.RWMutex
@@ -65,8 +70,42 @@ func New(cfg Config) (*Server, error) {
 		clients: make(map[string]*Client),
 	}
 
-	// Initialize configured rooms
+	// Connect to PostgreSQL if configured.
+	if cfg.Database != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		st, err := store.New(ctx, *cfg.Database)
+		if err != nil {
+			return nil, fmt.Errorf("init store: %w", err)
+		}
+		s.store = st
+		log.Println("[Server] 已连接 PostgreSQL 数据库")
+
+		// Load rooms from DB.
+		rooms, err := st.ListRooms(ctx)
+		if err != nil {
+			st.Close()
+			return nil, fmt.Errorf("load rooms: %w", err)
+		}
+		for _, r := range rooms {
+			alloc, err := network.NewIPAllocator(r.Subnet)
+			if err != nil {
+				log.Printf("[Server] 警告: 加载房间 %s 失败 (子网 %s): %v", r.Name, r.Subnet, err)
+				continue
+			}
+			s.rooms[r.Name] = &Room{
+				Name:      r.Name,
+				Allocator: alloc,
+				Clients:   make(map[string]*Client),
+			}
+		}
+	}
+
+	// Initialize configured rooms (legacy JSON config or defaults).
 	for name, rc := range cfg.RoomConfigs {
+		if _, exists := s.rooms[name]; exists {
+			continue // already loaded from DB
+		}
 		subnet := rc.Subnet
 		if subnet == "" {
 			subnet = "10.100.0.0/24"
@@ -110,6 +149,9 @@ func (s *Server) Start() error {
 
 // Stop stops the server.
 func (s *Server) Stop() error {
+	if s.store != nil {
+		s.store.Close()
+	}
 	if s.ln != nil {
 		return s.ln.Close()
 	}
@@ -147,6 +189,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 				return
 			}
 
+		case protocol.MsgTypeRegister:
+			s.handleRegister(conn, msg.Payload)
+
 		case protocol.MsgTypeJoinRoom:
 			if client == nil {
 				s.sendError(conn, 401, "未认证")
@@ -155,6 +200,16 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if err := s.handleJoinRoom(client, msg.Payload); err != nil {
 				log.Printf("[Server] 加入房间失败 %s: %v", remoteAddr, err)
 			}
+
+		case protocol.MsgTypeCreateRoom:
+			if client == nil {
+				s.sendError(conn, 401, "未认证")
+				return
+			}
+			s.handleCreateRoom(conn, client, msg.Payload)
+
+		case protocol.MsgTypeListRooms:
+			s.handleListRooms(conn)
 
 		case protocol.MsgTypeData:
 			if client == nil || client.roomName == "" {
@@ -174,6 +229,21 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if client != nil {
 				s.handleLeave(client)
 			}
+
+		case protocol.MsgTypeP2PPunchReq:
+			if client != nil {
+				s.handleP2PPunchReq(client, msg.Payload)
+			}
+
+		case protocol.MsgTypeP2POffer:
+			if client != nil {
+				s.handleP2POffer(client, msg.Payload)
+			}
+
+		case protocol.MsgTypeP2PAnswer:
+			if client != nil {
+				s.handleP2PAnswer(client, msg.Payload)
+			}
 		}
 	}
 }
@@ -184,9 +254,22 @@ func (s *Server) handleAuth(conn net.Conn, payload []byte) (*Client, error) {
 		return nil, fmt.Errorf("decode auth: %w", err)
 	}
 
-	// Verify credentials
-	expectedPass, exists := s.config.Users[req.Username]
-	if !exists || expectedPass != req.Password {
+	var authenticated bool
+
+	if s.store != nil {
+		// Database mode: verify against PostgreSQL
+		ok, err := s.store.AuthenticateUser(context.Background(), req.Username, req.Password)
+		if err != nil {
+			log.Printf("[Server] 数据库认证错误: %v", err)
+		}
+		authenticated = ok
+	} else {
+		// Legacy mode: verify against JSON config
+		expectedPass, exists := s.config.Users[req.Username]
+		authenticated = exists && expectedPass == req.Password
+	}
+
+	if !authenticated {
 		resp := &protocol.AuthResponse{
 			Success: false,
 			Message: "用户名或密码错误",
@@ -222,6 +305,125 @@ func (s *Server) handleAuth(conn net.Conn, payload []byte) (*Client, error) {
 	return client, nil
 }
 
+func (s *Server) handleRegister(conn net.Conn, payload []byte) {
+	req, err := protocol.DecodeRegisterRequest(payload)
+	if err != nil {
+		s.sendRegisterResp(conn, false, "请求格式错误")
+		return
+	}
+
+	if req.Username == "" {
+		s.sendRegisterResp(conn, false, "用户名不能为空")
+		return
+	}
+
+	if s.store == nil {
+		s.sendRegisterResp(conn, false, "服务器未配置数据库，不支持注册")
+		return
+	}
+
+	exists, err := s.store.UserExists(context.Background(), req.Username)
+	if err != nil {
+		log.Printf("[Server] 检查用户是否存在失败: %v", err)
+		s.sendRegisterResp(conn, false, "服务器内部错误")
+		return
+	}
+	if exists {
+		s.sendRegisterResp(conn, false, "用户名已存在")
+		return
+	}
+
+	if err := s.store.CreateUser(context.Background(), req.Username, req.Password); err != nil {
+		log.Printf("[Server] 创建用户失败: %v", err)
+		s.sendRegisterResp(conn, false, "注册失败")
+		return
+	}
+
+	log.Printf("[Server] 新用户注册: %s", req.Username)
+	s.sendRegisterResp(conn, true, "注册成功")
+}
+
+func (s *Server) sendRegisterResp(conn net.Conn, success bool, message string) {
+	resp := &protocol.RegisterResponse{Success: success, Message: message}
+	data, _ := protocol.EncodeRegisterResponse(resp)
+	protocol.WriteMessage(conn, &protocol.Message{Type: protocol.MsgTypeRegisterResp, Payload: data})
+}
+
+func (s *Server) handleCreateRoom(conn net.Conn, client *Client, payload []byte) {
+	req, err := protocol.DecodeCreateRoomRequest(payload)
+	if err != nil {
+		s.sendCreateRoomResp(conn, false, "请求格式错误")
+		return
+	}
+
+	if req.RoomName == "" {
+		s.sendCreateRoomResp(conn, false, "房间名称不能为空")
+		return
+	}
+	if req.Password == "" {
+		s.sendCreateRoomResp(conn, false, "房间密码不能为空")
+		return
+	}
+
+	// Check if room already exists
+	s.mu.RLock()
+	_, exists := s.rooms[req.RoomName]
+	s.mu.RUnlock()
+	if exists {
+		s.sendCreateRoomResp(conn, false, "房间名称已存在")
+		return
+	}
+
+	// Allocate subnet
+	s.mu.Lock()
+	roomNum := len(s.rooms) + 1
+	subnet := fmt.Sprintf("10.100.%d.0/24", roomNum)
+	alloc, err := network.NewIPAllocator(subnet)
+	if err != nil {
+		s.mu.Unlock()
+		s.sendCreateRoomResp(conn, false, "创建房间失败")
+		return
+	}
+	room := &Room{
+		Name:      req.RoomName,
+		Password:  req.Password,
+		Allocator: alloc,
+		Clients:   make(map[string]*Client),
+	}
+	s.rooms[req.RoomName] = room
+	s.mu.Unlock()
+
+	// Persist to DB if available
+	if s.store != nil {
+		if err := s.store.CreateRoom(context.Background(), req.RoomName, req.Password, subnet, client.username); err != nil {
+			log.Printf("[Server] 保存房间到数据库失败: %v", err)
+			// Room already created in memory, continue
+		}
+	}
+
+	log.Printf("[Server] 用户 %s 创建房间: %s (子网: %s)", client.username, req.RoomName, subnet)
+	s.sendCreateRoomResp(conn, true, fmt.Sprintf("房间 %s 创建成功", req.RoomName))
+}
+
+func (s *Server) sendCreateRoomResp(conn net.Conn, success bool, message string) {
+	resp := &protocol.CreateRoomResponse{Success: success, Message: message}
+	data, _ := protocol.EncodeCreateRoomResponse(resp)
+	protocol.WriteMessage(conn, &protocol.Message{Type: protocol.MsgTypeCreateRoomResp, Payload: data})
+}
+
+func (s *Server) handleListRooms(conn net.Conn) {
+	s.mu.RLock()
+	rooms := make([]protocol.RoomInfo, 0, len(s.rooms))
+	for name := range s.rooms {
+		rooms = append(rooms, protocol.RoomInfo{Name: name})
+	}
+	s.mu.RUnlock()
+
+	resp := &protocol.ListRoomsResponse{Rooms: rooms}
+	data, _ := protocol.EncodeListRoomsResponse(resp)
+	protocol.WriteMessage(conn, &protocol.Message{Type: protocol.MsgTypeListRoomsResp, Payload: data})
+}
+
 func (s *Server) handleJoinRoom(client *Client, payload []byte) error {
 	req, err := protocol.DecodeJoinRoomRequest(payload)
 	if err != nil {
@@ -236,33 +438,38 @@ func (s *Server) handleJoinRoom(client *Client, payload []byte) error {
 	s.mu.Lock()
 	room, exists := s.rooms[req.RoomName]
 	if !exists {
-		// Auto-create room with default subnet
-		roomNum := len(s.rooms) + 1
-		subnet := fmt.Sprintf("10.100.%d.0/24", roomNum)
-		alloc, err := network.NewIPAllocator(subnet)
-		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("create room allocator: %w", err)
+		s.mu.Unlock()
+		resp := &protocol.JoinRoomResponse{
+			Success: false,
+			Message: "房间不存在",
 		}
-		room = &Room{
-			Name:      req.RoomName,
-			Password:  req.Password,
-			Allocator: alloc,
-			Clients:   make(map[string]*Client),
-		}
-		s.rooms[req.RoomName] = room
-		log.Printf("[Server] 自动创建房间: %s (子网: %s)", req.RoomName, subnet)
+		data, _ := protocol.EncodeJoinRoomResponse(resp)
+		return protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeJoinRoomResp, Payload: data})
 	}
 	s.mu.Unlock()
 
 	// Check room password
-	if room.Password != "" && room.Password != req.Password {
-		resp := &protocol.JoinRoomResponse{
-			Success: false,
-			Message: "房间密码错误",
+	if s.store != nil {
+		// DB mode: verify against hashed password in database
+		_, err := s.store.AuthenticateRoom(context.Background(), req.RoomName, req.Password)
+		if err != nil {
+			resp := &protocol.JoinRoomResponse{
+				Success: false,
+				Message: "房间密码错误",
+			}
+			data, _ := protocol.EncodeJoinRoomResponse(resp)
+			return protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeJoinRoomResp, Payload: data})
 		}
-		data, _ := protocol.EncodeJoinRoomResponse(resp)
-		return protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeJoinRoomResp, Payload: data})
+	} else {
+		// Legacy mode: plain text comparison
+		if room.Password != "" && room.Password != req.Password {
+			resp := &protocol.JoinRoomResponse{
+				Success: false,
+				Message: "房间密码错误",
+			}
+			data, _ := protocol.EncodeJoinRoomResponse(resp)
+			return protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeJoinRoomResp, Payload: data})
+		}
 	}
 
 	// Allocate virtual IP (reuses lease from previous session if available)
@@ -395,6 +602,150 @@ func (s *Server) handleDisconnect(client *Client) {
 
 	log.Printf("[Server] 用户 %s 断开连接", client.username)
 }
+
+// ---------- P2P Signaling ----------
+
+func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
+	req, err := protocol.DecodeP2PPunchRequest(payload)
+	if err != nil {
+		return
+	}
+
+	s.mu.RLock()
+	room, exists := s.rooms[client.roomName]
+	s.mu.RUnlock()
+	if !exists {
+		return
+	}
+
+	room.mu.RLock()
+	target, exists := room.Clients[req.TargetVIP.String()]
+	room.mu.RUnlock()
+	if !exists {
+		return
+	}
+
+	// Generate a token to correlate the punch
+	token := generateToken()
+
+	// Send the requester's info to the target as an offer
+	client.mu.Lock()
+	clientVIP := client.virtualIP
+	clientUDP := client.udpAddr
+	client.mu.Unlock()
+
+	offer := &protocol.P2POffer{
+		FromVIP: clientVIP,
+		UDPAddr: clientUDP,
+		Token:   token,
+	}
+	data, _ := protocol.EncodeP2POffer(offer)
+	target.mu.Lock()
+	protocol.WriteMessage(target.conn, &protocol.Message{Type: protocol.MsgTypeP2POffer, Payload: data})
+	target.mu.Unlock()
+
+	// Send punch response back to requester with target info
+	target.mu.Lock()
+	targetUDP := target.udpAddr
+	targetVIP := target.virtualIP
+	target.mu.Unlock()
+
+	resp := &protocol.P2PPunchResponse{
+		PeerVIP:  targetVIP,
+		PeerAddr: targetUDP,
+		Token:    token,
+	}
+	respData, _ := protocol.EncodeP2PPunchResponse(resp)
+	client.mu.Lock()
+	protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeP2PPunchResp, Payload: respData})
+	client.mu.Unlock()
+}
+
+func (s *Server) handleP2POffer(client *Client, payload []byte) {
+	offer, err := protocol.DecodeP2POffer(payload)
+	if err != nil {
+		return
+	}
+
+	// Update client's known UDP address
+	client.mu.Lock()
+	client.udpAddr = offer.UDPAddr
+	client.mu.Unlock()
+
+	// Forward to target peer
+	s.mu.RLock()
+	room, exists := s.rooms[client.roomName]
+	s.mu.RUnlock()
+	if !exists {
+		return
+	}
+
+	room.mu.RLock()
+	// The offer's FromVIP is set to the sender when encoding; but here we
+	// need to relay, so the target is not explicitly named in the offer.
+	// For a relay, we replace FromVIP with the actual sender.
+	room.mu.RUnlock()
+
+	offer.FromVIP = client.virtualIP
+	data, _ := protocol.EncodeP2POffer(offer)
+
+	// Find target – this offer should be addressed to someone. Since the protocol
+	// doesn't include a target field, the server simply relays to ALL peers.
+	room.mu.RLock()
+	peers := make([]*Client, 0, len(room.Clients))
+	for _, c := range room.Clients {
+		if c != client {
+			peers = append(peers, c)
+		}
+	}
+	room.mu.RUnlock()
+
+	for _, c := range peers {
+		c.mu.Lock()
+		protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2POffer, Payload: data})
+		c.mu.Unlock()
+	}
+}
+
+func (s *Server) handleP2PAnswer(client *Client, payload []byte) {
+	answer, err := protocol.DecodeP2PAnswer(payload)
+	if err != nil {
+		return
+	}
+
+	// Update client's known UDP address
+	client.mu.Lock()
+	client.udpAddr = answer.UDPAddr
+	client.mu.Unlock()
+
+	// Forward to the peer identified by the answer's target
+	s.mu.RLock()
+	room, exists := s.rooms[client.roomName]
+	s.mu.RUnlock()
+	if !exists {
+		return
+	}
+
+	answer.FromVIP = client.virtualIP
+	data, _ := protocol.EncodeP2PAnswer(answer)
+
+	room.mu.RLock()
+	peers := make([]*Client, 0, len(room.Clients))
+	for _, c := range room.Clients {
+		if c != client {
+			peers = append(peers, c)
+		}
+	}
+	room.mu.RUnlock()
+
+	for _, c := range peers {
+		c.mu.Lock()
+		protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PAnswer, Payload: data})
+		c.mu.Unlock()
+	}
+}
+
+// ---------- Utilities ----------
 
 func (s *Server) broadcastPeerUpdate(room *Room) {
 	room.mu.RLock()

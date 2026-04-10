@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caikun233/godqv-networking/pkg/p2p"
 	"github.com/caikun233/godqv-networking/pkg/protocol"
 )
 
@@ -25,6 +26,7 @@ type PeerInfo struct {
 	Username  string
 	VirtualIP net.IP
 	Online    bool
+	P2P       bool // true if direct UDP link is active
 }
 
 // Client is the main client struct.
@@ -38,6 +40,7 @@ type Client struct {
 	peers     []PeerInfo
 	peersMu   sync.RWMutex
 	tunWriter TunWriter
+	p2pMgr    *p2p.Manager
 	mu        sync.Mutex
 	done      chan struct{}
 	closeOnce sync.Once
@@ -55,6 +58,21 @@ func New(cfg Config) *Client {
 		config: cfg,
 		done:   make(chan struct{}),
 	}
+}
+
+// SetConfig updates the client configuration. Must be called before JoinRoom.
+func (c *Client) SetConfig(cfg Config) {
+	c.config = cfg
+}
+
+// ServerAddr returns the configured server address.
+func (c *Client) ServerAddr() string {
+	return c.config.ServerAddr
+}
+
+// Username returns the configured username.
+func (c *Client) Username() string {
+	return c.config.Username
 }
 
 // SetTunWriter sets the TUN device writer for receiving packets.
@@ -125,6 +143,123 @@ func (c *Client) Connect() error {
 	return nil
 }
 
+// Register sends a registration request to the server. The connection must
+// already be established (call after dialing, before Connect/auth).
+func (c *Client) Register(serverAddr, username, password string) error {
+	conn, err := net.DialTimeout("tcp", serverAddr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("连接失败: %w", err)
+	}
+	defer conn.Close()
+
+	req := &protocol.RegisterRequest{
+		Username: username,
+		Password: password,
+	}
+	data, err := protocol.EncodeRegisterRequest(req)
+	if err != nil {
+		return fmt.Errorf("编码注册请求失败: %w", err)
+	}
+
+	if err := protocol.WriteMessage(conn, &protocol.Message{
+		Type:    protocol.MsgTypeRegister,
+		Payload: data,
+	}); err != nil {
+		return fmt.Errorf("发送注册请求失败: %w", err)
+	}
+
+	msg, err := protocol.ReadMessage(conn)
+	if err != nil {
+		return fmt.Errorf("读取注册响应失败: %w", err)
+	}
+
+	if msg.Type != protocol.MsgTypeRegisterResp {
+		return fmt.Errorf("意外的消息类型: %d", msg.Type)
+	}
+
+	resp, err := protocol.DecodeRegisterResponse(msg.Payload)
+	if err != nil {
+		return fmt.Errorf("解码注册响应失败: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("注册失败: %s", resp.Message)
+	}
+
+	return nil
+}
+
+// CreateRoom sends a create-room request to the server.
+func (c *Client) CreateRoom(name, password string) error {
+	req := &protocol.CreateRoomRequest{
+		RoomName: name,
+		Password: password,
+	}
+	data, err := protocol.EncodeCreateRoomRequest(req)
+	if err != nil {
+		return fmt.Errorf("编码创建房间请求失败: %w", err)
+	}
+
+	c.mu.Lock()
+	err = protocol.WriteMessage(c.conn, &protocol.Message{
+		Type:    protocol.MsgTypeCreateRoom,
+		Payload: data,
+	})
+	c.mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("发送创建房间请求失败: %w", err)
+	}
+
+	msg, err := protocol.ReadMessage(c.conn)
+	if err != nil {
+		return fmt.Errorf("读取创建房间响应失败: %w", err)
+	}
+
+	if msg.Type != protocol.MsgTypeCreateRoomResp {
+		return fmt.Errorf("意外的消息类型: %d", msg.Type)
+	}
+
+	resp, err := protocol.DecodeCreateRoomResponse(msg.Payload)
+	if err != nil {
+		return fmt.Errorf("解码创建房间响应失败: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("创建房间失败: %s", resp.Message)
+	}
+
+	log.Printf("[Client] 房间创建成功: %s", resp.Message)
+	return nil
+}
+
+// ListRooms requests the list of available rooms from the server.
+func (c *Client) ListRooms() ([]protocol.RoomInfo, error) {
+	c.mu.Lock()
+	err := protocol.WriteMessage(c.conn, &protocol.Message{
+		Type: protocol.MsgTypeListRooms,
+	})
+	c.mu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("发送列表请求失败: %w", err)
+	}
+
+	msg, err := protocol.ReadMessage(c.conn)
+	if err != nil {
+		return nil, fmt.Errorf("读取列表响应失败: %w", err)
+	}
+
+	if msg.Type != protocol.MsgTypeListRoomsResp {
+		return nil, fmt.Errorf("意外的消息类型: %d", msg.Type)
+	}
+
+	resp, err := protocol.DecodeListRoomsResponse(msg.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("解码列表响应失败: %w", err)
+	}
+
+	return resp.Rooms, nil
+}
+
 // JoinRoom joins a virtual network room.
 func (c *Client) JoinRoom() error {
 	req := &protocol.JoinRoomRequest{
@@ -171,6 +306,34 @@ func (c *Client) JoinRoom() error {
 	return nil
 }
 
+// InitP2P initialises the P2P UDP manager. Call after JoinRoom and setting
+// the TUN writer, before StartReceiving.
+func (c *Client) InitP2P() error {
+	mgr, err := p2p.NewManager(func(packet []byte) {
+		// Data received directly via P2P – write to TUN.
+		if c.tunWriter != nil {
+			c.tunWriter.WritePacket(packet)
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("init P2P: %w", err)
+	}
+	c.p2pMgr = mgr
+
+	// Report our public UDP address to the server via a P2POffer so the
+	// server knows where to direct other peers.
+	offer := &protocol.P2POffer{
+		FromVIP: c.virtualIP,
+		UDPAddr: mgr.LocalAddr(),
+	}
+	data, _ := protocol.EncodeP2POffer(offer)
+	c.mu.Lock()
+	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2POffer, Payload: data})
+	c.mu.Unlock()
+
+	return nil
+}
+
 // VirtualIP returns the assigned virtual IP.
 func (c *Client) VirtualIP() net.IP {
 	return c.virtualIP
@@ -190,8 +353,17 @@ func (c *Client) GetPeers() []PeerInfo {
 	return result
 }
 
-// SendPacket sends an IP packet to the server for routing.
+// SendPacket sends an IP packet. Tries P2P first, falls back to TCP relay.
 func (c *Client) SendPacket(packet []byte) error {
+	// Try P2P if available. Verify IPv4 header before extracting dest IP.
+	if c.p2pMgr != nil && len(packet) >= 20 && packet[0]>>4 == 4 {
+		dstIP := net.IP(packet[16:20])
+		if c.p2pMgr.SendPacket(dstIP, packet) {
+			return nil // Sent via P2P!
+		}
+	}
+
+	// Fall back to TCP relay.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return protocol.WriteMessage(c.conn, &protocol.Message{
@@ -211,6 +383,9 @@ func (c *Client) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
 		close(c.done)
+		if c.p2pMgr != nil {
+			c.p2pMgr.Close()
+		}
 		if c.conn != nil {
 			// Send leave message
 			protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeLeave})
@@ -266,10 +441,15 @@ func (c *Client) receiveLoop() {
 			c.peersMu.Lock()
 			c.peers = make([]PeerInfo, len(update.Peers))
 			for i, p := range update.Peers {
+				isP2P := false
+				if c.p2pMgr != nil {
+					isP2P = c.p2pMgr.GetActiveLink(p.VirtualIP)
+				}
 				c.peers[i] = PeerInfo{
 					Username:  p.Username,
 					VirtualIP: p.VirtualIP,
 					Online:    p.Online,
+					P2P:       isP2P,
 				}
 			}
 			c.peersMu.Unlock()
@@ -277,6 +457,15 @@ func (c *Client) receiveLoop() {
 			log.Printf("[Client] 节点更新 - 房间 %s, %d 个节点在线", update.RoomName, len(update.Peers))
 			for _, p := range update.Peers {
 				log.Printf("  - %s (%s) [在线: %v]", p.Username, p.VirtualIP, p.Online)
+			}
+
+			// Attempt P2P hole-punching for new peers.
+			if c.p2pMgr != nil {
+				for _, p := range update.Peers {
+					if !p.VirtualIP.Equal(c.virtualIP) && !c.p2pMgr.GetActiveLink(p.VirtualIP) {
+						c.requestP2PPunch(p.VirtualIP)
+					}
+				}
 			}
 
 			if c.onPeerUpdate != nil {
@@ -291,8 +480,73 @@ func (c *Client) receiveLoop() {
 			if err == nil {
 				log.Printf("[Client] 服务器错误 [%d]: %s", errMsg.Code, errMsg.Message)
 			}
+
+		case protocol.MsgTypeP2POffer:
+			c.handleP2POffer(msg.Payload)
+
+		case protocol.MsgTypeP2PPunchResp:
+			c.handleP2PPunchResp(msg.Payload)
+
+		case protocol.MsgTypeP2PAnswer:
+			c.handleP2PAnswer(msg.Payload)
 		}
 	}
+}
+
+func (c *Client) requestP2PPunch(targetVIP net.IP) {
+	req := &protocol.P2PPunchRequest{TargetVIP: targetVIP}
+	data, _ := protocol.EncodeP2PPunchRequest(req)
+	c.mu.Lock()
+	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PPunchReq, Payload: data})
+	c.mu.Unlock()
+}
+
+func (c *Client) handleP2POffer(payload []byte) {
+	offer, err := protocol.DecodeP2POffer(payload)
+	if err != nil {
+		return
+	}
+	if c.p2pMgr == nil || offer.UDPAddr == "" {
+		return
+	}
+	log.Printf("[P2P] 收到打洞请求: %s → %s", offer.FromVIP, offer.UDPAddr)
+	c.p2pMgr.AddPeer(offer.FromVIP, offer.UDPAddr)
+
+	// Send answer back
+	answer := &protocol.P2PAnswer{
+		FromVIP:  c.virtualIP,
+		UDPAddr:  c.p2pMgr.LocalAddr(),
+		Token:    offer.Token,
+		Accepted: true,
+	}
+	data, _ := protocol.EncodeP2PAnswer(answer)
+	c.mu.Lock()
+	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PAnswer, Payload: data})
+	c.mu.Unlock()
+}
+
+func (c *Client) handleP2PPunchResp(payload []byte) {
+	resp, err := protocol.DecodeP2PPunchResponse(payload)
+	if err != nil {
+		return
+	}
+	if c.p2pMgr == nil || resp.PeerAddr == "" {
+		return
+	}
+	log.Printf("[P2P] 收到打洞响应: %s → %s", resp.PeerVIP, resp.PeerAddr)
+	c.p2pMgr.AddPeer(resp.PeerVIP, resp.PeerAddr)
+}
+
+func (c *Client) handleP2PAnswer(payload []byte) {
+	answer, err := protocol.DecodeP2PAnswer(payload)
+	if err != nil {
+		return
+	}
+	if c.p2pMgr == nil || answer.UDPAddr == "" || !answer.Accepted {
+		return
+	}
+	log.Printf("[P2P] 收到打洞应答: %s → %s", answer.FromVIP, answer.UDPAddr)
+	c.p2pMgr.AddPeer(answer.FromVIP, answer.UDPAddr)
 }
 
 func (c *Client) keepaliveLoop() {

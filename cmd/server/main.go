@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/caikun233/godqv-networking/internal/server"
+	"github.com/caikun233/godqv-networking/pkg/store"
 )
 
 var (
@@ -93,7 +94,26 @@ func defaultConfig() server.Config {
 }
 
 func generateDefaultConfig() {
-	cfg := defaultConfig()
+	cfg := server.Config{
+		ListenAddr: ":9527",
+		Database: &store.Config{
+			Host:     "localhost",
+			Port:     5432,
+			User:     "godqv",
+			Password: "godqv_password",
+			Database: "godqv",
+			SSLMode:  "disable",
+		},
+		Users: map[string]string{
+			"admin": "admin123",
+		},
+		RoomConfigs: map[string]server.RoomConfig{
+			"default": {
+				Password: "default123",
+				Subnet:   "10.100.1.0/24",
+			},
+		},
+	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		log.Fatalf("生成配置失败: %v", err)
@@ -104,5 +124,6 @@ func generateDefaultConfig() {
 		log.Fatalf("写入配置文件失败: %v", err)
 	}
 	fmt.Printf("已生成示例配置文件: %s\n", filename)
-	fmt.Println("请修改配置后启动服务器")
+	fmt.Println("请修改 database 配置以连接 PostgreSQL")
+	fmt.Println("若不配置 database 字段，将使用 JSON 内置用户 (兼容旧模式)")
 }
