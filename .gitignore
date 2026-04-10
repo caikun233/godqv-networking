@@ -3,3 +3,8 @@ dist/
 server.json
 client.json
 *.log
+
+# Go build output in project root
+/client
+/server
+/gui

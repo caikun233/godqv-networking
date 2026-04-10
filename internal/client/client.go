@@ -186,7 +186,6 @@ func (c *Client) Register(serverAddr, username, password string) error {
 		return fmt.Errorf("注册失败: %s", resp.Message)
 	}
 
-	log.Printf("[Client] 注册成功: %s", resp.Message)
 	return nil
 }
 
@@ -356,8 +355,8 @@ func (c *Client) GetPeers() []PeerInfo {
 
 // SendPacket sends an IP packet. Tries P2P first, falls back to TCP relay.
 func (c *Client) SendPacket(packet []byte) error {
-	// Try P2P if available.
-	if c.p2pMgr != nil && len(packet) >= 20 {
+	// Try P2P if available. Verify IPv4 header before extracting dest IP.
+	if c.p2pMgr != nil && len(packet) >= 20 && packet[0]>>4 == 4 {
 		dstIP := net.IP(packet[16:20])
 		if c.p2pMgr.SendPacket(dstIP, packet) {
 			return nil // Sent via P2P!

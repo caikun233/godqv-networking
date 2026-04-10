@@ -61,8 +61,10 @@ func main() {
 			log.Fatalf("注册需要指定 -server 和 -user 参数")
 		}
 		c := client.New(client.Config{})
-		if err := c.Register(*serverAddr, *username, *password); err != nil {
-			log.Fatalf("注册失败: %v", err)
+		err := c.Register(*serverAddr, *username, *password)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "注册失败: %v\n", err)
+			os.Exit(1)
 		}
 		fmt.Println("注册成功！请使用登录命令连接")
 		return

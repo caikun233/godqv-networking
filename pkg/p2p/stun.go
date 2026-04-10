@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -47,6 +48,7 @@ func stunQuery(conn *net.UDPConn, server string) (string, error) {
 
 	// Build STUN Binding Request (minimal, no attributes).
 	txID := make([]byte, 12)
+	rand.Read(txID) // RFC 5389: transaction ID must be cryptographically random
 	// RFC 5389: type(2) + length(2) + magic cookie(4) + transaction ID(12) = 20 bytes
 	req := make([]byte, stunHeaderSize)
 	binary.BigEndian.PutUint16(req[0:2], stunBindRequest)

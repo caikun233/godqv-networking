@@ -441,7 +441,7 @@ func (s *Server) handleJoinRoom(client *Client, payload []byte) error {
 		s.mu.Unlock()
 		resp := &protocol.JoinRoomResponse{
 			Success: false,
-			Message: "房间不存在，请先创建房间",
+			Message: "房间不存在",
 		}
 		data, _ := protocol.EncodeJoinRoomResponse(resp)
 		return protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeJoinRoomResp, Payload: data})
