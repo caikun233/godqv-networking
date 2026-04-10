@@ -71,8 +71,12 @@ func main() {
 		if runtime.GOOS == "linux" || runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 			var err error
 			subnet := c.Subnet()
+			tunName := "godqv0"
+			if runtime.GOOS == "windows" {
+				tunName = "GodQV Networking"
+			}
 			tunDev, err = tunnel.CreateTUN(tunnel.Config{
-				Name:    "godqv0",
+				Name:    tunName,
 				Address: c.VirtualIP(),
 				Subnet:  subnet,
 				MTU:     1400,
