@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -36,7 +38,35 @@ func (tw *tunWrapper) WritePacket(packet []byte) error {
 	return err
 }
 
+type memLogger struct {
+	mu    sync.Mutex
+	lines []string
+	list  *widget.List
+}
+
+func (l *memLogger) Write(p []byte) (n int, err error) {
+	l.mu.Lock()
+	l.lines = append(l.lines, strings.TrimRight(string(p), "\n"))
+	if len(l.lines) > 1000 {
+		l.lines = l.lines[len(l.lines)-1000:]
+	}
+	l.mu.Unlock()
+
+	if l.list != nil {
+		fyne.Do(func() {
+			l.list.Refresh()
+			l.list.ScrollToBottom()
+		})
+	}
+	return len(p), nil
+}
+
+var globalLogger = &memLogger{}
+
 func main() {
+	// Setup custom logger to capture logs in GUI
+	log.SetOutput(io.MultiWriter(os.Stdout, globalLogger))
+
 	// On Windows, attempt to self-elevate via UAC if not already running as
 	// administrator. This is important because creating TUN devices (wintun)
 	// requires admin privileges.
@@ -341,7 +371,12 @@ func (g *GUI) showCreateRoomDialog(statusLabel *widget.Label, onCreated func()) 
 }
 
 func (g *GUI) showMainScreen() {
-	vipLabel := widget.NewLabel(fmt.Sprintf("虚拟IP: %s", g.client.VirtualIP()))
+	vipStr := g.client.VirtualIP().String()
+	vipLabel := widget.NewLabel(fmt.Sprintf("虚拟IP: %s", vipStr))
+	copyVipBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
+		g.window.Clipboard().SetContent(vipStr)
+	})
+	
 	subnet := g.client.Subnet()
 	subnetLabel := widget.NewLabel(fmt.Sprintf("子网: %s", subnet.String()))
 
@@ -425,7 +460,9 @@ func (g *GUI) showMainScreen() {
 			return len(peerData)
 		},
 		func() fyne.CanvasObject {
-			return widget.NewLabel("peer")
+			btn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), nil)
+			lbl := widget.NewLabel("peer")
+			return container.NewBorder(nil, nil, nil, btn, lbl)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			peerDataMu.Lock()
@@ -440,7 +477,19 @@ func (g *GUI) showMainScreen() {
 				if !p.Online {
 					status = "离线"
 				}
-				obj.(*widget.Label).SetText(fmt.Sprintf("%s - %s [%s] (%s)", p.Username, p.VirtualIP, status, mode))
+				
+				c := obj.(*fyne.Container)
+				text := fmt.Sprintf("%s - %s [%s] (%s)", p.Username, p.VirtualIP, status, mode)
+				for _, o := range c.Objects {
+					switch v := o.(type) {
+					case *widget.Label:
+						v.SetText(text)
+					case *widget.Button:
+						v.OnTapped = func() {
+							g.window.Clipboard().SetContent(p.VirtualIP.String())
+						}
+					}
+				}
 			}
 		},
 	)
@@ -471,7 +520,7 @@ func (g *GUI) showMainScreen() {
 	infoItems := []fyne.CanvasObject{
 		widget.NewRichTextFromMarkdown("## 神区互联 - 已连接"),
 		widget.NewSeparator(),
-		vipLabel,
+		container.NewHBox(vipLabel, copyVipBtn),
 		subnetLabel,
 		tunLabel,
 		statusLabel,
@@ -491,12 +540,46 @@ func (g *GUI) showMainScreen() {
 		disconnectBtn,
 	)
 
-	content := container.NewBorder(info, bottom, nil, nil, peerList)
-	g.window.SetContent(container.NewPadded(content))
+	// Log List view
+	logList := widget.NewList(
+		func() int {
+			globalLogger.mu.Lock()
+			defer globalLogger.mu.Unlock()
+			return len(globalLogger.lines)
+		},
+		func() fyne.CanvasObject {
+			l := widget.NewLabel("log line")
+			l.Wrapping = fyne.TextWrapWord
+			return l
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			globalLogger.mu.Lock()
+			defer globalLogger.mu.Unlock()
+			if id < len(globalLogger.lines) {
+				obj.(*widget.Label).SetText(globalLogger.lines[id])
+			}
+		},
+	)
+	globalLogger.mu.Lock()
+	globalLogger.list = logList
+	globalLogger.mu.Unlock()
+
+	mainContent := container.NewBorder(info, bottom, nil, nil, peerList)
+	
+	tabs := container.NewAppTabs(
+		container.NewTabItemWithIcon("主面板", theme.HomeIcon(), mainContent),
+		container.NewTabItemWithIcon("运行日志", theme.DocumentIcon(), container.NewBorder(nil, nil, nil, nil, logList)),
+	)
+	tabs.SetTabLocation(container.TabLocationTop)
+
+	g.window.SetContent(container.NewPadded(tabs))
 
 	// Monitor connection
 	go func() {
 		<-g.client.Done()
+		globalLogger.mu.Lock()
+		globalLogger.list = nil
+		globalLogger.mu.Unlock()
 		fyne.Do(func() {
 			statusLabel.SetText("连接已断开")
 		})
