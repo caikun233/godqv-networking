@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
@@ -39,64 +41,28 @@ func (tw *tunWrapper) WritePacket(packet []byte) error {
 }
 
 type memLogger struct {
-	mu       sync.Mutex
-	lines    []string
-	lists    []*widget.List
-	onChange func() // callback when new log is written
+	mu      sync.Mutex
+	lines   []string
+	logData binding.StringList
 }
 
 func (l *memLogger) Write(p []byte) (n int, err error) {
-	l.mu.Lock()
 	text := strings.TrimRight(string(p), "\n")
+	if text == "" {
+		return len(p), nil
+	}
+	l.mu.Lock()
 	l.lines = append(l.lines, text)
 	if len(l.lines) > 1000 {
 		l.lines = l.lines[len(l.lines)-1000:]
 	}
-	lists := make([]*widget.List, len(l.lists))
-	copy(lists, l.lists)
-	cb := l.onChange
+	snapshot := make([]string, len(l.lines))
+	copy(snapshot, l.lines)
 	l.mu.Unlock()
 
-	// Refresh all registered lists
-	if len(lists) > 0 {
-		fyne.Do(func() {
-			for _, list := range lists {
-				if list != nil {
-					list.Refresh()
-					list.ScrollToBottom()
-				}
-			}
-		})
-	}
-
-	// Call onChange callback if set
-	if cb != nil {
-		cb()
-	}
+	// Update binding – Fyne binding is thread-safe and auto-notifies the list.
+	_ = l.logData.Set(snapshot)
 	return len(p), nil
-}
-
-func (l *memLogger) RegisterList(list *widget.List) {
-	l.mu.Lock()
-	l.lists = append(l.lists, list)
-	l.mu.Unlock()
-}
-
-func (l *memLogger) UnregisterList(list *widget.List) {
-	l.mu.Lock()
-	for i, ll := range l.lists {
-		if ll == list {
-			l.lists = append(l.lists[:i], l.lists[i+1:]...)
-			break
-		}
-	}
-	l.mu.Unlock()
-}
-
-func (l *memLogger) SetOnChange(cb func()) {
-	l.mu.Lock()
-	l.onChange = cb
-	l.mu.Unlock()
 }
 
 func (l *memLogger) Lines() []string {
@@ -107,26 +73,43 @@ func (l *memLogger) Lines() []string {
 	return result
 }
 
-func (l *memLogger) LineCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.lines)
+var globalLogger = &memLogger{
+	logData: binding.NewStringList(),
 }
 
-func (l *memLogger) Line(i int) string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if i < len(l.lines) {
-		return l.lines[i]
+// openLogFile creates (or opens for append) the log file in the user config directory.
+// Returns the file, its path, and any error.
+func openLogFile() (*os.File, string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		configDir = os.TempDir()
 	}
-	return ""
+	logDir := filepath.Join(configDir, "GodQV Networking")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return nil, "", fmt.Errorf("无法创建日志目录: %w", err)
+	}
+	logPath := filepath.Join(logDir, "godqv.log")
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, "", err
+	}
+	return f, logPath, nil
 }
-
-var globalLogger = &memLogger{}
 
 func main() {
 	// Setup custom logger to capture logs in GUI
-	log.SetOutput(io.MultiWriter(os.Stdout, globalLogger))
+	writers := []io.Writer{os.Stdout, globalLogger}
+	logFile, logFilePath, err := openLogFile()
+	if err == nil {
+		writers = append(writers, logFile)
+		defer logFile.Close()
+	}
+	log.SetOutput(io.MultiWriter(writers...))
+	if err != nil {
+		log.Printf("警告: 无法打开日志文件: %v", err)
+	} else {
+		log.Printf("日志文件: %s", logFilePath)
+	}
 
 	// On Windows, attempt to self-elevate via UAC if not already running as
 	// administrator. This is important because creating TUN devices (wintun)
@@ -626,26 +609,27 @@ func (g *GUI) showLogWindow() {
 	logWindow := g.app.NewWindow("运行日志 - GodQV Networking")
 	logWindow.Resize(fyne.NewSize(700, 500))
 
-	logList := widget.NewList(
-		func() int {
-			return globalLogger.LineCount()
-		},
+	// Use binding-based list so Fyne handles all refresh/threading automatically.
+	logList := widget.NewListWithData(
+		globalLogger.logData,
 		func() fyne.CanvasObject {
-			l := widget.NewLabel("log line")
-			l.Wrapping = fyne.TextWrapWord
-			return l
+			return widget.NewLabel("")
 		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			obj.(*widget.Label).SetText(globalLogger.Line(id))
+		func(item binding.DataItem, obj fyne.CanvasObject) {
+			str, _ := item.(binding.String).Get()
+			obj.(*widget.Label).SetText(str)
 		},
 	)
 
-	// 注册此列表以便自动刷新
-	globalLogger.RegisterList(logList)
-
-	// 窗口关闭时注销列表
+	// Auto-scroll to the latest entry whenever new log lines arrive.
+	scrollListener := binding.NewDataListener(func() {
+		fyne.Do(func() {
+			logList.ScrollToBottom()
+		})
+	})
+	globalLogger.logData.AddListener(scrollListener)
 	logWindow.SetOnClosed(func() {
-		globalLogger.UnregisterList(logList)
+		globalLogger.logData.RemoveListener(scrollListener)
 	})
 
 	// 清空日志按钮
@@ -653,7 +637,7 @@ func (g *GUI) showLogWindow() {
 		globalLogger.mu.Lock()
 		globalLogger.lines = nil
 		globalLogger.mu.Unlock()
-		logList.Refresh()
+		_ = globalLogger.logData.Set(nil)
 	})
 
 	// 复制全部日志按钮
@@ -671,8 +655,8 @@ func (g *GUI) showLogWindow() {
 	content := container.NewBorder(toolbar, nil, nil, nil, logList)
 	logWindow.SetContent(container.NewPadded(content))
 
-	// 打开时滚动到底部
-	logList.ScrollToBottom()
-
 	logWindow.Show()
+
+	// Scroll to bottom after the window has been rendered.
+	logList.ScrollToBottom()
 }
