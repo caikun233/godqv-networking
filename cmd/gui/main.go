@@ -39,26 +39,87 @@ func (tw *tunWrapper) WritePacket(packet []byte) error {
 }
 
 type memLogger struct {
-	mu    sync.Mutex
-	lines []string
-	list  *widget.List
+	mu       sync.Mutex
+	lines    []string
+	lists    []*widget.List
+	onChange func() // callback when new log is written
 }
 
 func (l *memLogger) Write(p []byte) (n int, err error) {
 	l.mu.Lock()
-	l.lines = append(l.lines, strings.TrimRight(string(p), "\n"))
+	text := strings.TrimRight(string(p), "\n")
+	l.lines = append(l.lines, text)
 	if len(l.lines) > 1000 {
 		l.lines = l.lines[len(l.lines)-1000:]
 	}
+	lists := make([]*widget.List, len(l.lists))
+	copy(lists, l.lists)
+	cb := l.onChange
 	l.mu.Unlock()
 
-	if l.list != nil {
+	// Refresh all registered lists
+	if len(lists) > 0 {
 		fyne.Do(func() {
-			l.list.Refresh()
-			l.list.ScrollToBottom()
+			for _, list := range lists {
+				if list != nil {
+					list.Refresh()
+					list.ScrollToBottom()
+				}
+			}
 		})
 	}
+
+	// Call onChange callback if set
+	if cb != nil {
+		cb()
+	}
 	return len(p), nil
+}
+
+func (l *memLogger) RegisterList(list *widget.List) {
+	l.mu.Lock()
+	l.lists = append(l.lists, list)
+	l.mu.Unlock()
+}
+
+func (l *memLogger) UnregisterList(list *widget.List) {
+	l.mu.Lock()
+	for i, ll := range l.lists {
+		if ll == list {
+			l.lists = append(l.lists[:i], l.lists[i+1:]...)
+			break
+		}
+	}
+	l.mu.Unlock()
+}
+
+func (l *memLogger) SetOnChange(cb func()) {
+	l.mu.Lock()
+	l.onChange = cb
+	l.mu.Unlock()
+}
+
+func (l *memLogger) Lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	result := make([]string, len(l.lines))
+	copy(result, l.lines)
+	return result
+}
+
+func (l *memLogger) LineCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.lines)
+}
+
+func (l *memLogger) Line(i int) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if i < len(l.lines) {
+		return l.lines[i]
+	}
+	return ""
 }
 
 var globalLogger = &memLogger{}
@@ -73,7 +134,9 @@ func main() {
 	ensureElevated()
 
 	a := app.New()
+	a.SetIcon(AppIcon)
 	w := a.NewWindow("神区互联 - GodQV Networking")
+	w.SetIcon(AppIcon)
 	w.Resize(fyne.NewSize(520, 600))
 
 	gui := &GUI{
@@ -376,7 +439,7 @@ func (g *GUI) showMainScreen() {
 	copyVipBtn := widget.NewButtonWithIcon("", theme.ContentCopyIcon(), func() {
 		g.window.Clipboard().SetContent(vipStr)
 	})
-	
+
 	subnet := g.client.Subnet()
 	subnetLabel := widget.NewLabel(fmt.Sprintf("子网: %s", subnet.String()))
 
@@ -477,7 +540,7 @@ func (g *GUI) showMainScreen() {
 				if !p.Online {
 					status = "离线"
 				}
-				
+
 				c := obj.(*fyne.Container)
 				text := fmt.Sprintf("%s - %s [%s] (%s)", p.Username, p.VirtualIP, status, mode)
 				for _, o := range c.Objects {
@@ -535,17 +598,37 @@ func (g *GUI) showMainScreen() {
 	)
 	info := container.NewVBox(infoItems...)
 
+	// 日志查看按钮 - 在新窗口中打开日志
+	logBtn := widget.NewButtonWithIcon("运行日志", theme.DocumentIcon(), func() {
+		g.showLogWindow()
+	})
+
 	bottom := container.NewVBox(
 		widget.NewSeparator(),
-		disconnectBtn,
+		container.NewGridWithColumns(2, logBtn, disconnectBtn),
 	)
 
-	// Log List view
+	mainContent := container.NewBorder(info, bottom, nil, nil, peerList)
+
+	g.window.SetContent(container.NewPadded(mainContent))
+
+	// Monitor connection
+	go func() {
+		<-g.client.Done()
+		fyne.Do(func() {
+			statusLabel.SetText("连接已断开")
+		})
+	}()
+}
+
+// showLogWindow 打开一个单独的窗口显示运行日志。
+func (g *GUI) showLogWindow() {
+	logWindow := g.app.NewWindow("运行日志 - GodQV Networking")
+	logWindow.Resize(fyne.NewSize(700, 500))
+
 	logList := widget.NewList(
 		func() int {
-			globalLogger.mu.Lock()
-			defer globalLogger.mu.Unlock()
-			return len(globalLogger.lines)
+			return globalLogger.LineCount()
 		},
 		func() fyne.CanvasObject {
 			l := widget.NewLabel("log line")
@@ -553,35 +636,43 @@ func (g *GUI) showMainScreen() {
 			return l
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			globalLogger.mu.Lock()
-			defer globalLogger.mu.Unlock()
-			if id < len(globalLogger.lines) {
-				obj.(*widget.Label).SetText(globalLogger.lines[id])
-			}
+			obj.(*widget.Label).SetText(globalLogger.Line(id))
 		},
 	)
-	globalLogger.mu.Lock()
-	globalLogger.list = logList
-	globalLogger.mu.Unlock()
 
-	mainContent := container.NewBorder(info, bottom, nil, nil, peerList)
-	
-	tabs := container.NewAppTabs(
-		container.NewTabItemWithIcon("主面板", theme.HomeIcon(), mainContent),
-		container.NewTabItemWithIcon("运行日志", theme.DocumentIcon(), container.NewBorder(nil, nil, nil, nil, logList)),
-	)
-	tabs.SetTabLocation(container.TabLocationTop)
+	// 注册此列表以便自动刷新
+	globalLogger.RegisterList(logList)
 
-	g.window.SetContent(container.NewPadded(tabs))
+	// 窗口关闭时注销列表
+	logWindow.SetOnClosed(func() {
+		globalLogger.UnregisterList(logList)
+	})
 
-	// Monitor connection
-	go func() {
-		<-g.client.Done()
+	// 清空日志按钮
+	clearBtn := widget.NewButton("清空日志", func() {
 		globalLogger.mu.Lock()
-		globalLogger.list = nil
+		globalLogger.lines = nil
 		globalLogger.mu.Unlock()
-		fyne.Do(func() {
-			statusLabel.SetText("连接已断开")
-		})
-	}()
+		logList.Refresh()
+	})
+
+	// 复制全部日志按钮
+	copyBtn := widget.NewButton("复制全部", func() {
+		lines := globalLogger.Lines()
+		g.window.Clipboard().SetContent(strings.Join(lines, "\n"))
+	})
+
+	toolbar := container.NewHBox(
+		widget.NewLabel("日志条目: "),
+		clearBtn,
+		copyBtn,
+	)
+
+	content := container.NewBorder(toolbar, nil, nil, nil, logList)
+	logWindow.SetContent(container.NewPadded(content))
+
+	// 打开时滚动到底部
+	logList.ScrollToBottom()
+
+	logWindow.Show()
 }
