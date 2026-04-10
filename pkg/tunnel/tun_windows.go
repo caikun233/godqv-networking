@@ -28,6 +28,11 @@ func CreateTUN(cfg Config) (Device, error) {
 		cfg.Name = "GodQV"
 	}
 
+	// Extract embedded wintun.dll to the executable's directory.
+	if err := ensureWintunDLL(); err != nil {
+		return nil, fmt.Errorf("ensure wintun.dll: %w", err)
+	}
+
 	adapter, err := wintun.CreateAdapter(cfg.Name, "GodQV Networking", nil)
 	if err != nil {
 		return nil, fmt.Errorf("create wintun adapter: %w", err)
