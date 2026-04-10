@@ -3,11 +3,14 @@
 package tunnel
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"strconv"
+	"syscall"
+	"unsafe"
 )
 
 // DarwinTUN implements Device for macOS using utun.
@@ -17,48 +20,90 @@ type DarwinTUN struct {
 	config Config
 }
 
+// System constants for macOS utun
+const (
+	sysSIOCGIFNAME = 0xc0206910 // SIOCGIFNAME
+	pfSystem        = 30         // PF_SYSTEM
+	sockDgram       = 2          // SOCK_DGRAM
+	sysprotoControl = 2          // SYSPROTO_CONTROL
+	afSysControl    = 2          // AF_SYS_CONTROL
+	utunControl     = "com.apple.net.utun_control"
+	utunOptIfname   = 2          // UTUN_OPT_IFNAME
+)
+
+type sockaddrCtl struct {
+	scLen      uint8
+	scFamily   uint8
+	ssSysaddr  uint16
+	scID       uint32
+	scUnit     uint32
+	scReserved [5]uint32
+}
+
+type ctlInfo struct {
+	ctlID   uint32
+	ctlName [96]byte
+}
+
 // CreateTUN creates a new TUN device on macOS.
 func CreateTUN(cfg Config) (Device, error) {
 	if cfg.MTU == 0 {
 		cfg.MTU = 1400
 	}
 
-	// On macOS, we use utun devices
-	// Try to find an available utun device
-	for i := 0; i < 256; i++ {
-		name := fmt.Sprintf("utun%d", i)
-		fd, err := createUtun(i)
-		if err != nil {
-			continue
-		}
-		file := os.NewFile(uintptr(fd), name)
-		tun := &DarwinTUN{
-			file:   file,
-			name:   name,
-			config: cfg,
-		}
-		if err := tun.configure(); err != nil {
-			file.Close()
-			return nil, err
-		}
-		return tun, nil
-	}
-	return nil, fmt.Errorf("no available utun device")
-}
-
-func createUtun(num int) (int, error) {
-	// Use socket-based utun creation
-	fd, err := unix_socket(30, 2, 6) // PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL
+	fd, err := syscall.Socket(pfSystem, sockDgram, sysprotoControl)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("create socket: %w", err)
 	}
-	_ = num
-	return fd, nil
-}
 
-// Simplified: use exec to configure since direct syscall is complex on macOS
-func unix_socket(domain, typ, proto int) (int, error) {
-	return 0, fmt.Errorf("not implemented - use water library or similar")
+	var info ctlInfo
+	copy(info.ctlName[:], utunControl)
+
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd),
+		uintptr(0xc0644e03), // CTLIOCGINFO
+		uintptr(unsafe.Pointer(&info)))
+	if errno != 0 {
+		syscall.Close(fd)
+		return nil, fmt.Errorf("CTLIOCGINFO: %w", errno)
+	}
+
+	// Try to find an available utun device (starting from utun0)
+	for unitNum := uint32(0); unitNum < 256; unitNum++ {
+		addr := sockaddrCtl{
+			scLen:     uint8(unsafe.Sizeof(sockaddrCtl{})),
+			scFamily:  afSysControl,
+			scID:      info.ctlID,
+			scUnit:    unitNum + 1, // utun unit numbers are 1-based
+		}
+
+		_, _, errno = syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd),
+			uintptr(unsafe.Pointer(&addr)),
+			uintptr(unsafe.Sizeof(addr)))
+		if errno == 0 {
+			// Get the actual interface name
+			name := fmt.Sprintf("utun%d", unitNum)
+
+			if err := syscall.SetNonblock(fd, false); err != nil {
+				syscall.Close(fd)
+				return nil, fmt.Errorf("set nonblock: %w", err)
+			}
+
+			file := os.NewFile(uintptr(fd), name)
+			tun := &DarwinTUN{
+				file:   file,
+				name:   name,
+				config: cfg,
+			}
+			if err := tun.configure(); err != nil {
+				file.Close()
+				return nil, err
+			}
+			return tun, nil
+		}
+	}
+
+	syscall.Close(fd)
+	return nil, fmt.Errorf("no available utun device")
 }
 
 func (t *DarwinTUN) configure() error {
@@ -88,27 +133,30 @@ func (t *DarwinTUN) Name() string {
 }
 
 func (t *DarwinTUN) Read(buf []byte) (int, error) {
-	// macOS utun prepends a 4-byte header
+	// macOS utun prepends a 4-byte protocol header
 	tmp := make([]byte, len(buf)+4)
 	n, err := t.file.Read(tmp)
 	if err != nil {
 		return 0, err
 	}
 	if n <= 4 {
-		return 0, fmt.Errorf("short read")
+		return 0, fmt.Errorf("short read from utun")
 	}
 	copy(buf, tmp[4:n])
 	return n - 4, nil
 }
 
 func (t *DarwinTUN) Write(buf []byte) (int, error) {
-	// macOS utun expects a 4-byte header (AF_INET = 2)
+	// macOS utun expects a 4-byte protocol header (AF_INET = 2 in network byte order)
 	tmp := make([]byte, len(buf)+4)
-	tmp[3] = 2 // AF_INET
+	binary.BigEndian.PutUint32(tmp[:4], 2) // AF_INET
 	copy(tmp[4:], buf)
 	n, err := t.file.Write(tmp)
 	if err != nil {
 		return 0, err
+	}
+	if n <= 4 {
+		return 0, nil
 	}
 	return n - 4, nil
 }

@@ -119,7 +119,7 @@ func (c *Client) Connect() error {
 	}
 
 	c.token = authResp.Token
-	log.Printf("[Client] 认证成功: %s", authResp.Message)
+	log.Printf("[Client] 认证成功，欢迎 %s", c.config.Username)
 
 	return nil
 }

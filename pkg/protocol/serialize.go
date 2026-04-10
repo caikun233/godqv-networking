@@ -166,11 +166,10 @@ func EncodeJoinRoomResponse(resp *JoinRoomResponse) ([]byte, error) {
 		if err := writeIP(&buf, resp.VirtualIP); err != nil {
 			return nil, err
 		}
-		ones, bits := resp.Subnet.Mask.Size()
+		ones, _ := resp.Subnet.Mask.Size()
 		if err := binary.Write(&buf, binary.BigEndian, uint8(ones)); err != nil {
 			return nil, err
 		}
-		_ = bits
 		if err := writeString(&buf, resp.RoomName); err != nil {
 			return nil, err
 		}

@@ -56,7 +56,7 @@ func main() {
 	c := client.New(cfg)
 
 	if err := c.Connect(); err != nil {
-		log.Fatalf("连接失败: %v", err)
+		log.Fatalf("连接失败，请检查服务器地址和用户凭据")
 	}
 	defer c.Close()
 

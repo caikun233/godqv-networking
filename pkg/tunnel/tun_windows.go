@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"strconv"
 	"strings"
 
 	"golang.zx2c4.com/wintun"
@@ -57,11 +56,7 @@ func CreateTUN(cfg Config) (Device, error) {
 }
 
 func (t *WindowsTUN) configure() error {
-	luid := t.adapter.LUID()
-	_ = luid
-
 	addr := t.config.Address.String()
-	ones, _ := t.config.Subnet.Mask.Size()
 
 	// Set IP address using netsh
 	cmd := exec.Command("netsh", "interface", "ip", "set", "address",
@@ -93,7 +88,6 @@ func (t *WindowsTUN) configure() error {
 	)
 	cmd.CombinedOutput() // Best effort
 
-	_ = strconv.Itoa(ones)
 	return nil
 }
 

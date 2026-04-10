@@ -43,7 +43,7 @@
 git clone https://github.com/caikun233/godqv-networking.git
 cd godqv-networking
 
-# 编译（需要 Go 1.21+）
+# 编译（需要 Go 1.24+）
 make build
 
 # 或交叉编译所有平台

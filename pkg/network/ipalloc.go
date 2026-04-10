@@ -97,8 +97,5 @@ func (a *IPAllocator) isBroadcast(ip net.IP) bool {
 			return false
 		}
 	}
-	return ip4[0]|a.network.Mask[0] == 0xff &&
-		ip4[1]|a.network.Mask[1] == 0xff &&
-		ip4[2]|a.network.Mask[2] == 0xff &&
-		ip4[3]|a.network.Mask[3] == 0xff
+	return true
 }
