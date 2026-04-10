@@ -3,11 +3,13 @@
 package tunnel
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"os/exec"
 	"strings"
 
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
 
@@ -17,6 +19,22 @@ type WindowsTUN struct {
 	session wintun.Session
 	name    string
 	config  Config
+	// closeEvent is signaled when the device is closed so that blocking
+	// Read calls can be interrupted.
+	closeEvent windows.Handle
+}
+
+// deterministicGUID generates a deterministic GUID from an adapter name so
+// that Windows reuses the same network connection profile across restarts
+// instead of creating "GodQV Networking 2", "GodQV Networking 3", etc.
+func deterministicGUID(name string) *windows.GUID {
+	h := sha256.Sum256([]byte("godqv-networking:" + name))
+	return &windows.GUID{
+		Data1: uint32(h[0])<<24 | uint32(h[1])<<16 | uint32(h[2])<<8 | uint32(h[3]),
+		Data2: uint16(h[4])<<8 | uint16(h[5]),
+		Data3: uint16(h[6])<<8 | uint16(h[7]),
+		Data4: [8]byte{h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]},
+	}
 }
 
 // CreateTUN creates a new TUN device on Windows using Wintun.
@@ -33,7 +51,15 @@ func CreateTUN(cfg Config) (Device, error) {
 		return nil, fmt.Errorf("ensure wintun.dll: %w", err)
 	}
 
-	adapter, err := wintun.CreateAdapter(cfg.Name, "GodQV Networking Virtual LAN Ethernet Adapter", nil)
+	guid := deterministicGUID(cfg.Name)
+
+	// Try to close any stale adapter with the same name first so we get a
+	// clean session. Errors here are expected if no such adapter exists.
+	if old, err := wintun.OpenAdapter(cfg.Name); err == nil {
+		old.Close()
+	}
+
+	adapter, err := wintun.CreateAdapter(cfg.Name, "GodQV Networking Virtual LAN Ethernet Adapter", guid)
 	if err != nil {
 		return nil, fmt.Errorf("create wintun adapter: %w", err)
 	}
@@ -44,16 +70,25 @@ func CreateTUN(cfg Config) (Device, error) {
 		return nil, fmt.Errorf("start session: %w", err)
 	}
 
+	closeEvent, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		session.End()
+		adapter.Close()
+		return nil, fmt.Errorf("create close event: %w", err)
+	}
+
 	tun := &WindowsTUN{
-		adapter: adapter,
-		session: session,
-		name:    cfg.Name,
-		config:  cfg,
+		adapter:    adapter,
+		session:    session,
+		name:       cfg.Name,
+		config:     cfg,
+		closeEvent: closeEvent,
 	}
 
 	if err := tun.configure(); err != nil {
 		session.End()
 		adapter.Close()
+		windows.CloseHandle(closeEvent)
 		return nil, fmt.Errorf("configure: %w", err)
 	}
 
@@ -101,13 +136,31 @@ func (t *WindowsTUN) Name() string {
 }
 
 func (t *WindowsTUN) Read(buf []byte) (int, error) {
-	packet, err := t.session.ReceivePacket()
-	if err != nil {
-		return 0, err
+	readWait := t.session.ReadWaitEvent()
+	events := [2]windows.Handle{readWait, t.closeEvent}
+
+	for {
+		packet, err := t.session.ReceivePacket()
+		if err == nil {
+			n := copy(buf, packet)
+			t.session.ReleaseReceivePacket(packet)
+			return n, nil
+		}
+		// ERROR_NO_MORE_ITEMS (259) means no packet is available yet.
+		// Wait for either a new packet or the device being closed.
+		result, waitErr := windows.WaitForMultipleObjects(events[:], false, windows.INFINITE)
+		if waitErr != nil {
+			return 0, fmt.Errorf("wait for read event: %w", waitErr)
+		}
+		switch result {
+		case windows.WAIT_OBJECT_0: // readWait signaled – packet available
+			continue
+		case windows.WAIT_OBJECT_0 + 1: // closeEvent signaled
+			return 0, fmt.Errorf("TUN device closed")
+		default:
+			return 0, fmt.Errorf("unexpected wait result: %d", result)
+		}
 	}
-	n := copy(buf, packet)
-	t.session.ReleaseReceivePacket(packet)
-	return n, nil
 }
 
 func (t *WindowsTUN) Write(buf []byte) (int, error) {
@@ -121,7 +174,10 @@ func (t *WindowsTUN) Write(buf []byte) (int, error) {
 }
 
 func (t *WindowsTUN) Close() error {
+	// Signal the close event to unblock any pending Read calls.
+	windows.SetEvent(t.closeEvent)
 	t.session.End()
 	t.adapter.Close()
+	windows.CloseHandle(t.closeEvent)
 	return nil
 }
