@@ -97,6 +97,13 @@ func openLogFile() (*os.File, string, error) {
 }
 
 func main() {
+	// On Windows, attach a console window so that all log output is visible to
+	// the user.  This works both when the binary is built without -H windowsgui
+	// (the console already exists) and when it is built with -H windowsgui
+	// (AllocConsole creates a new console window and stdout/stderr are
+	// redirected to it).
+	attachConsole()
+
 	// Setup custom logger to capture logs in GUI
 	writers := []io.Writer{os.Stdout, globalLogger}
 	logFile, logFilePath, err := openLogFile()
