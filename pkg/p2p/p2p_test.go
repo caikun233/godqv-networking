@@ -3,7 +3,6 @@ package p2p
 import (
 	"net"
 	"testing"
-	"time"
 )
 
 // TestAddPeerDeduplication verifies that calling AddPeer multiple times for
@@ -34,9 +33,8 @@ func TestAddPeerDeduplication(t *testing.T) {
 		t.Fatalf("first AddPeer: %v", err)
 	}
 
-	// Give the goroutine a moment to start.
-	time.Sleep(10 * time.Millisecond)
-
+	// punching flag is set synchronously in AddPeer before the goroutine
+	// starts, so no sleep is needed.
 	m.mu.RLock()
 	link1 := m.links[peerVIP.String()]
 	m.mu.RUnlock()
@@ -106,7 +104,6 @@ func TestAddPeerSkipsActive(t *testing.T) {
 		PeerAddr: peerAddr,
 		Active:   true,
 		punching: false,
-		stopCh:   make(chan struct{}),
 	}
 	m.mu.Unlock()
 

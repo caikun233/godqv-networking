@@ -51,8 +51,7 @@ type PeerLink struct {
 	Candidates []*net.UDPAddr // All candidate addresses including predicted ports
 	PeerNAT    NATType        // Peer's NAT type
 	Active     bool
-	punching   bool           // true while a punchHole goroutine is running
-	stopCh     chan struct{}   // closed to cancel a running punchHole goroutine
+	punching   bool // true while a punchHole goroutine is running
 }
 
 // Manager handles P2P UDP connections for the local client.
@@ -190,7 +189,6 @@ func (m *Manager) AddPeer(peerVIP net.IP, peerAddr string, candidates []string, 
 		PeerNAT:    peerNAT,
 		Active:     false,
 		punching:   true,
-		stopCh:     make(chan struct{}),
 	}
 	m.links[vipStr] = link
 	m.mu.Unlock()
@@ -359,9 +357,6 @@ func (m *Manager) punchHole(link *PeerLink) {
 
 	for {
 		select {
-		case <-link.stopCh:
-			log.Printf("[P2P] 打洞被取消 (收到停止信号): %s", link.PeerVIP)
-			return
 		case <-m.done:
 			log.Printf("[P2P] 打洞中断 (管理器关闭): %s", link.PeerVIP)
 			return
