@@ -136,7 +136,7 @@ func (m *Manager) AddPeer(peerVIP net.IP, peerAddr string) error {
 
 	vipStr := peerVIP.String()
 	m.mu.Lock()
-	// Check if we already have an active link
+	// 检查是否已有活跃连接
 	if existing, ok := m.links[vipStr]; ok && existing.Active {
 		m.mu.Unlock()
 		log.Printf("[P2P] 已有活跃连接到 %s, 跳过打洞", peerVIP)

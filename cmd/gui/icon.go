@@ -4,23 +4,23 @@ import (
 	"fyne.io/fyne/v2"
 )
 
-// AppIcon returns the application icon as a Fyne resource.
-// This icon shows a stylized dragon and globe design representing networking.
+// AppIcon 返回应用程序图标作为 Fyne 资源。
+// 此图标显示代表网络的龙与地球设计。
 //
-// To update the icon with your custom dragon image:
-// 1. Save your icon as icon.png in this directory
-// 2. Run: go run fyne.io/fyne/v2/cmd/fyne bundle -o bundled_icon.go -package main icon.png
-// 3. Update AppIcon to use the bundled resource
+// 要使用自定义的龙形图标更新图标：
+// 1. 将图标保存为 icon.png 到此目录
+// 2. 运行: go run fyne.io/fyne/v2/cmd/fyne bundle -o bundled_icon.go -package main icon.png
+// 3. 更新 AppIcon 以使用打包的资源
 //
-// Or manually convert your PNG to bytes and replace iconData below.
+// 或者手动将 PNG 转换为字节并替换下面的 iconData。
 var AppIcon = &fyne.StaticResource{
 	StaticName:    "icon.png",
 	StaticContent: iconData,
 }
 
-// iconData contains the embedded PNG icon data.
-// Current placeholder: A 64x64 PNG icon with a simple globe/network design.
-// Replace this with your actual dragon+globe icon.
+// iconData 包含嵌入的 PNG 图标数据。
+// 当前占位符：一个 64x64 的 PNG 图标，带有简单的地球/网络设计。
+// 请用实际的龙+地球图标替换此数据。
 var iconData = []byte{
 	// PNG file signature
 	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,

@@ -598,7 +598,7 @@ func (g *GUI) showMainScreen() {
 	)
 	info := container.NewVBox(infoItems...)
 
-	// Log viewer button - opens log in a new window
+	// 日志查看按钮 - 在新窗口中打开日志
 	logBtn := widget.NewButtonWithIcon("运行日志", theme.DocumentIcon(), func() {
 		g.showLogWindow()
 	})
@@ -621,7 +621,7 @@ func (g *GUI) showMainScreen() {
 	}()
 }
 
-// showLogWindow opens a separate window displaying runtime logs.
+// showLogWindow 打开一个单独的窗口显示运行日志。
 func (g *GUI) showLogWindow() {
 	logWindow := g.app.NewWindow("运行日志 - GodQV Networking")
 	logWindow.Resize(fyne.NewSize(700, 500))
@@ -640,15 +640,15 @@ func (g *GUI) showLogWindow() {
 		},
 	)
 
-	// Register this list for auto-refresh
+	// 注册此列表以便自动刷新
 	globalLogger.RegisterList(logList)
 
-	// Unregister when window closes
+	// 窗口关闭时注销列表
 	logWindow.SetOnClosed(func() {
 		globalLogger.UnregisterList(logList)
 	})
 
-	// Clear log button
+	// 清空日志按钮
 	clearBtn := widget.NewButton("清空日志", func() {
 		globalLogger.mu.Lock()
 		globalLogger.lines = nil
@@ -656,7 +656,7 @@ func (g *GUI) showLogWindow() {
 		logList.Refresh()
 	})
 
-	// Copy all logs button
+	// 复制全部日志按钮
 	copyBtn := widget.NewButton("复制全部", func() {
 		lines := globalLogger.Lines()
 		g.window.Clipboard().SetContent(strings.Join(lines, "\n"))
@@ -671,7 +671,7 @@ func (g *GUI) showLogWindow() {
 	content := container.NewBorder(toolbar, nil, nil, nil, logList)
 	logWindow.SetContent(container.NewPadded(content))
 
-	// Scroll to bottom on open
+	// 打开时滚动到底部
 	logList.ScrollToBottom()
 
 	logWindow.Show()
