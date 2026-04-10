@@ -53,6 +53,11 @@ func CreateTUN(cfg Config) (Device, error) {
 
 	guid := deterministicGUID(cfg.Name)
 
+	// Try to clean up any stale wintun adapters with the same tunnel type,
+	// except the one we are about to create/use to avoid lingering numbered adapters.
+	exec.Command("powershell", "-Command",
+		fmt.Sprintf("Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'Virtual LAN Ethernet Adapter' -and $_.Name -ne '%s' } | Remove-NetAdapter -Confirm:$false", cfg.Name)).Run()
+
 	// Try to close any stale adapter with the same name first so we get a
 	// clean session. Errors here are expected if no such adapter exists.
 	if old, err := wintun.OpenAdapter(cfg.Name); err == nil {
@@ -117,16 +122,9 @@ func (t *WindowsTUN) configure() error {
 	)
 	cmd.CombinedOutput() // Best effort
 
-	// Add route
-	gateway := make(net.IP, 4)
-	copy(gateway, t.config.Address.To4())
-	cmd = exec.Command("route", "add",
-		t.config.Subnet.IP.String(),
-		"mask", net.IP(t.config.Subnet.Mask).String(),
-		gateway.String(),
-		"metric", "10",
-	)
-	cmd.CombinedOutput() // Best effort
+	// Since we set a static IP and subnet mask via netsh, Windows will automatically
+	// create the correct On-Link route for the subnet. Manually adding the route
+	// with a self-referencing gateway often results in routing loops or conflicts.
 
 	return nil
 }
