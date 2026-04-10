@@ -332,12 +332,33 @@ func (c *Client) InitP2P() error {
 		mgr.SetEventCallback(c.onP2PEvent)
 	}
 
-	// Report our public UDP address to the server via a P2POffer so the
-	// server knows where to direct other peers.
-	log.Printf("[P2P] 向服务器报告本地公网UDP地址: %s (VIP=%s)", mgr.LocalAddr(), c.virtualIP)
+	// Emit NAT detection event.
+	if mgr.NATInfo() != nil {
+		mgr.SetEventCallback(func(evt p2p.Event) {
+			if c.onP2PEvent != nil {
+				c.onP2PEvent(evt)
+			}
+		})
+		// Report NAT type detected event.
+		if c.onP2PEvent != nil {
+			c.onP2PEvent(p2p.Event{
+				Type:    p2p.EventNATDetected,
+				NATType: mgr.NATInfo().Type,
+			})
+		}
+	}
+
+	// Report our public UDP address, NAT type, and candidates to the server
+	// via a P2POffer so the server knows where to direct other peers.
+	natInfo := mgr.NATInfo()
+	log.Printf("[P2P] 向服务器报告: 公网UDP=%s, NAT类型=%s, 候选地址=%d个",
+		mgr.LocalAddr(), natInfo.Type, len(natInfo.Candidates))
+
 	offer := &protocol.P2POffer{
-		FromVIP: c.virtualIP,
-		UDPAddr: mgr.LocalAddr(),
+		FromVIP:    c.virtualIP,
+		UDPAddr:    mgr.LocalAddr(),
+		NATType:    uint8(natInfo.Type),
+		Candidates: natInfo.Candidates,
 	}
 	data, _ := protocol.EncodeP2POffer(offer)
 	c.mu.Lock()
@@ -541,22 +562,29 @@ func (c *Client) handleP2POffer(payload []byte) {
 		log.Printf("[P2P] 收到P2POffer但对端无UDP地址: FromVIP=%s", offer.FromVIP)
 		return
 	}
-	log.Printf("[P2P] 收到打洞请求: 来自=%s, 对端UDP=%s, Token=%s", offer.FromVIP, offer.UDPAddr, offer.Token)
-	log.Printf("[P2P]   本地UDP地址=%s, 准备添加对端并发送应答", c.p2pMgr.LocalAddr())
-	c.p2pMgr.AddPeer(offer.FromVIP, offer.UDPAddr)
+	log.Printf("[P2P] 收到打洞请求: 来自=%s, 对端UDP=%s, NAT=%d, 候选数=%d, Token=%s",
+		offer.FromVIP, offer.UDPAddr, offer.NATType, len(offer.Candidates), offer.Token)
+	log.Printf("[P2P]   本地UDP地址=%s, NAT=%s, 准备添加对端并发送应答",
+		c.p2pMgr.LocalAddr(), c.p2pMgr.NATInfo().Type)
 
-	// Send answer back
+	c.p2pMgr.AddPeer(offer.FromVIP, offer.UDPAddr, offer.Candidates, p2p.NATType(offer.NATType))
+
+	// Send answer back with our NAT info and candidates.
+	natInfo := c.p2pMgr.NATInfo()
 	answer := &protocol.P2PAnswer{
-		FromVIP:  c.virtualIP,
-		UDPAddr:  c.p2pMgr.LocalAddr(),
-		Token:    offer.Token,
-		Accepted: true,
+		FromVIP:    c.virtualIP,
+		UDPAddr:    c.p2pMgr.LocalAddr(),
+		Token:      offer.Token,
+		Accepted:   true,
+		NATType:    uint8(natInfo.Type),
+		Candidates: natInfo.Candidates,
 	}
 	data, _ := protocol.EncodeP2PAnswer(answer)
 	c.mu.Lock()
 	protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PAnswer, Payload: data})
 	c.mu.Unlock()
-	log.Printf("[P2P] 已发送P2PAnswer: 本地VIP=%s, 本地UDP=%s, Token=%s", c.virtualIP, c.p2pMgr.LocalAddr(), offer.Token)
+	log.Printf("[P2P] 已发送P2PAnswer: 本地VIP=%s, 本地UDP=%s, NAT=%s, 候选数=%d",
+		c.virtualIP, c.p2pMgr.LocalAddr(), natInfo.Type, len(natInfo.Candidates))
 }
 
 func (c *Client) handleP2PPunchResp(payload []byte) {
@@ -573,8 +601,9 @@ func (c *Client) handleP2PPunchResp(payload []byte) {
 		log.Printf("[P2P] 收到P2PPunchResp但对端无UDP地址: PeerVIP=%s (对端可能未初始化P2P)", resp.PeerVIP)
 		return
 	}
-	log.Printf("[P2P] 收到打洞响应: 对端VIP=%s, 对端UDP=%s, Token=%s", resp.PeerVIP, resp.PeerAddr, resp.Token)
-	c.p2pMgr.AddPeer(resp.PeerVIP, resp.PeerAddr)
+	log.Printf("[P2P] 收到打洞响应: 对端VIP=%s, 对端UDP=%s, NAT=%d, 候选数=%d, Token=%s",
+		resp.PeerVIP, resp.PeerAddr, resp.NATType, len(resp.Candidates), resp.Token)
+	c.p2pMgr.AddPeer(resp.PeerVIP, resp.PeerAddr, resp.Candidates, p2p.NATType(resp.NATType))
 }
 
 func (c *Client) handleP2PAnswer(payload []byte) {
@@ -595,9 +624,9 @@ func (c *Client) handleP2PAnswer(payload []byte) {
 		log.Printf("[P2P] 对端拒绝P2P连接: FromVIP=%s, UDPAddr=%s", answer.FromVIP, answer.UDPAddr)
 		return
 	}
-	log.Printf("[P2P] 收到打洞应答: 对端VIP=%s, 对端UDP=%s, Token=%s, Accepted=%v",
-		answer.FromVIP, answer.UDPAddr, answer.Token, answer.Accepted)
-	c.p2pMgr.AddPeer(answer.FromVIP, answer.UDPAddr)
+	log.Printf("[P2P] 收到打洞应答: 对端VIP=%s, 对端UDP=%s, NAT=%d, 候选数=%d, Token=%s, Accepted=%v",
+		answer.FromVIP, answer.UDPAddr, answer.NATType, len(answer.Candidates), answer.Token, answer.Accepted)
+	c.p2pMgr.AddPeer(answer.FromVIP, answer.UDPAddr, answer.Candidates, p2p.NATType(answer.NATType))
 }
 
 func (c *Client) keepaliveLoop() {

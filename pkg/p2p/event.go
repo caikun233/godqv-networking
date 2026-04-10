@@ -12,11 +12,14 @@ const (
 	EventPunchSuccess
 	// EventPunchTimeout is emitted when hole-punching times out.
 	EventPunchTimeout
+	// EventNATDetected is emitted when local NAT type has been detected.
+	EventNATDetected
 )
 
 // Event carries information about a P2P hole-punching event.
 type Event struct {
 	Type     EventType
 	PeerVIP  net.IP
-	PeerAddr string // UDP endpoint (may be empty for some events)
+	PeerAddr string  // UDP endpoint (may be empty for some events)
+	NATType  NATType // NAT type (only set for EventNATDetected)
 }

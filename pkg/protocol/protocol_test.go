@@ -272,9 +272,11 @@ func TestP2PPunchRequestRoundTrip(t *testing.T) {
 
 func TestP2PPunchResponseRoundTrip(t *testing.T) {
 	resp := &P2PPunchResponse{
-		PeerVIP:  net.ParseIP("10.100.1.2").To4(),
-		PeerAddr: "203.0.113.5:12345",
-		Token:    "abc123token",
+		PeerVIP:    net.ParseIP("10.100.1.2").To4(),
+		PeerAddr:   "203.0.113.5:12345",
+		Token:      "abc123token",
+		NATType:    2,
+		Candidates: []string{"203.0.113.5:12345", "192.168.1.10:54321"},
 	}
 	data, err := EncodeP2PPunchResponse(resp)
 	if err != nil {
@@ -287,13 +289,26 @@ func TestP2PPunchResponseRoundTrip(t *testing.T) {
 	if !decoded.PeerVIP.Equal(resp.PeerVIP) || decoded.PeerAddr != resp.PeerAddr || decoded.Token != resp.Token {
 		t.Errorf("Mismatch: got %+v, want %+v", decoded, resp)
 	}
+	if decoded.NATType != resp.NATType {
+		t.Errorf("NATType mismatch: got %d, want %d", decoded.NATType, resp.NATType)
+	}
+	if len(decoded.Candidates) != len(resp.Candidates) {
+		t.Errorf("Candidates length mismatch: got %d, want %d", len(decoded.Candidates), len(resp.Candidates))
+	}
+	for i, c := range decoded.Candidates {
+		if c != resp.Candidates[i] {
+			t.Errorf("Candidate %d mismatch: got %s, want %s", i, c, resp.Candidates[i])
+		}
+	}
 }
 
 func TestP2POfferRoundTrip(t *testing.T) {
 	offer := &P2POffer{
-		FromVIP: net.ParseIP("10.100.1.1").To4(),
-		UDPAddr: "198.51.100.10:54321",
-		Token:   "offer-token",
+		FromVIP:    net.ParseIP("10.100.1.1").To4(),
+		UDPAddr:    "198.51.100.10:54321",
+		Token:      "offer-token",
+		NATType:    1,
+		Candidates: []string{"198.51.100.10:54321", "10.0.0.5:54321"},
 	}
 	data, err := EncodeP2POffer(offer)
 	if err != nil {
@@ -306,14 +321,22 @@ func TestP2POfferRoundTrip(t *testing.T) {
 	if !decoded.FromVIP.Equal(offer.FromVIP) || decoded.UDPAddr != offer.UDPAddr || decoded.Token != offer.Token {
 		t.Errorf("Mismatch: got %+v, want %+v", decoded, offer)
 	}
+	if decoded.NATType != offer.NATType {
+		t.Errorf("NATType mismatch: got %d, want %d", decoded.NATType, offer.NATType)
+	}
+	if len(decoded.Candidates) != len(offer.Candidates) {
+		t.Errorf("Candidates length mismatch: got %d, want %d", len(decoded.Candidates), len(offer.Candidates))
+	}
 }
 
 func TestP2PAnswerRoundTrip(t *testing.T) {
 	answer := &P2PAnswer{
-		FromVIP:  net.ParseIP("10.100.1.3").To4(),
-		UDPAddr:  "192.0.2.50:9999",
-		Token:    "answer-token",
-		Accepted: true,
+		FromVIP:    net.ParseIP("10.100.1.3").To4(),
+		UDPAddr:    "192.0.2.50:9999",
+		Token:      "answer-token",
+		Accepted:   true,
+		NATType:    2,
+		Candidates: []string{"192.0.2.50:9999", "172.16.0.1:9999"},
 	}
 	data, err := EncodeP2PAnswer(answer)
 	if err != nil {
@@ -326,6 +349,12 @@ func TestP2PAnswerRoundTrip(t *testing.T) {
 	if !decoded.FromVIP.Equal(answer.FromVIP) || decoded.UDPAddr != answer.UDPAddr ||
 		decoded.Token != answer.Token || decoded.Accepted != answer.Accepted {
 		t.Errorf("Mismatch: got %+v, want %+v", decoded, answer)
+	}
+	if decoded.NATType != answer.NATType {
+		t.Errorf("NATType mismatch: got %d, want %d", decoded.NATType, answer.NATType)
+	}
+	if len(decoded.Candidates) != len(answer.Candidates) {
+		t.Errorf("Candidates length mismatch: got %d, want %d", len(decoded.Candidates), len(answer.Candidates))
 	}
 }
 
@@ -346,5 +375,28 @@ func TestP2PAnswerRejectedRoundTrip(t *testing.T) {
 	}
 	if decoded.Accepted != false || decoded.Token != "reject-token" {
 		t.Errorf("Mismatch: got %+v, want %+v", decoded, answer)
+	}
+}
+
+func TestP2POfferNoCandidatesRoundTrip(t *testing.T) {
+	offer := &P2POffer{
+		FromVIP: net.ParseIP("10.100.1.1").To4(),
+		UDPAddr: "198.51.100.10:54321",
+		Token:   "offer-no-cand",
+		NATType: 0,
+	}
+	data, err := EncodeP2POffer(offer)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	decoded, err := DecodeP2POffer(data)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.NATType != 0 {
+		t.Errorf("NATType mismatch: got %d, want 0", decoded.NATType)
+	}
+	if len(decoded.Candidates) != 0 {
+		t.Errorf("Expected 0 candidates, got %d", len(decoded.Candidates))
 	}
 }
