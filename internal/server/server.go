@@ -608,13 +608,18 @@ func (s *Server) handleDisconnect(client *Client) {
 func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	req, err := protocol.DecodeP2PPunchRequest(payload)
 	if err != nil {
+		log.Printf("[Server-P2P] 解码PunchReq失败 (来自 %s): %v", client.username, err)
 		return
 	}
+
+	log.Printf("[Server-P2P] 收到打洞请求: %s (VIP=%s) → 目标VIP=%s",
+		client.username, client.virtualIP, req.TargetVIP)
 
 	s.mu.RLock()
 	room, exists := s.rooms[client.roomName]
 	s.mu.RUnlock()
 	if !exists {
+		log.Printf("[Server-P2P] 打洞请求失败: 客户端 %s 不在任何房间中", client.username)
 		return
 	}
 
@@ -622,6 +627,7 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	target, exists := room.Clients[req.TargetVIP.String()]
 	room.mu.RUnlock()
 	if !exists {
+		log.Printf("[Server-P2P] 打洞请求失败: 目标VIP %s 不在房间 %s 中", req.TargetVIP, room.Name)
 		return
 	}
 
@@ -633,6 +639,13 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	clientVIP := client.virtualIP
 	clientUDP := client.udpAddr
 	client.mu.Unlock()
+
+	log.Printf("[Server-P2P] 中继打洞: %s (UDP=%s) ←→ %s (UDP=%s), Token=%s",
+		client.username, clientUDP, target.username, target.udpAddr, token)
+
+	if clientUDP == "" {
+		log.Printf("[Server-P2P] ⚠ 警告: 请求方 %s 没有UDP地址 (P2P可能未初始化)", client.username)
+	}
 
 	offer := &protocol.P2POffer{
 		FromVIP: clientVIP,
@@ -650,6 +663,10 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	targetVIP := target.virtualIP
 	target.mu.Unlock()
 
+	if targetUDP == "" {
+		log.Printf("[Server-P2P] ⚠ 警告: 目标方 %s 没有UDP地址 (P2P可能未初始化)", target.username)
+	}
+
 	resp := &protocol.P2PPunchResponse{
 		PeerVIP:  targetVIP,
 		PeerAddr: targetUDP,
@@ -659,32 +676,37 @@ func (s *Server) handleP2PPunchReq(client *Client, payload []byte) {
 	client.mu.Lock()
 	protocol.WriteMessage(client.conn, &protocol.Message{Type: protocol.MsgTypeP2PPunchResp, Payload: respData})
 	client.mu.Unlock()
+
+	log.Printf("[Server-P2P] 打洞信令已发送: Offer→%s, PunchResp→%s", target.username, client.username)
 }
 
 func (s *Server) handleP2POffer(client *Client, payload []byte) {
 	offer, err := protocol.DecodeP2POffer(payload)
 	if err != nil {
+		log.Printf("[Server-P2P] 解码P2POffer失败 (来自 %s): %v", client.username, err)
 		return
 	}
 
 	// Update client's known UDP address
 	client.mu.Lock()
+	oldUDP := client.udpAddr
 	client.udpAddr = offer.UDPAddr
 	client.mu.Unlock()
+
+	log.Printf("[Server-P2P] 收到P2POffer: 来自=%s (VIP=%s), UDP=%s",
+		client.username, client.virtualIP, offer.UDPAddr)
+	if oldUDP != "" && oldUDP != offer.UDPAddr {
+		log.Printf("[Server-P2P] 客户端 %s UDP地址已更新: %s → %s", client.username, oldUDP, offer.UDPAddr)
+	}
 
 	// Forward to target peer
 	s.mu.RLock()
 	room, exists := s.rooms[client.roomName]
 	s.mu.RUnlock()
 	if !exists {
+		log.Printf("[Server-P2P] 转发P2POffer失败: 客户端 %s 不在任何房间中", client.username)
 		return
 	}
-
-	room.mu.RLock()
-	// The offer's FromVIP is set to the sender when encoding; but here we
-	// need to relay, so the target is not explicitly named in the offer.
-	// For a relay, we replace FromVIP with the actual sender.
-	room.mu.RUnlock()
 
 	offer.FromVIP = client.virtualIP
 	data, _ := protocol.EncodeP2POffer(offer)
@@ -700,6 +722,7 @@ func (s *Server) handleP2POffer(client *Client, payload []byte) {
 	}
 	room.mu.RUnlock()
 
+	log.Printf("[Server-P2P] 转发P2POffer到 %d 个对端", len(peers))
 	for _, c := range peers {
 		c.mu.Lock()
 		protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2POffer, Payload: data})
@@ -710,19 +733,28 @@ func (s *Server) handleP2POffer(client *Client, payload []byte) {
 func (s *Server) handleP2PAnswer(client *Client, payload []byte) {
 	answer, err := protocol.DecodeP2PAnswer(payload)
 	if err != nil {
+		log.Printf("[Server-P2P] 解码P2PAnswer失败 (来自 %s): %v", client.username, err)
 		return
 	}
 
 	// Update client's known UDP address
 	client.mu.Lock()
+	oldUDP := client.udpAddr
 	client.udpAddr = answer.UDPAddr
 	client.mu.Unlock()
+
+	log.Printf("[Server-P2P] 收到P2PAnswer: 来自=%s (VIP=%s), UDP=%s, Accepted=%v",
+		client.username, client.virtualIP, answer.UDPAddr, answer.Accepted)
+	if oldUDP != "" && oldUDP != answer.UDPAddr {
+		log.Printf("[Server-P2P] 客户端 %s UDP地址已更新: %s → %s", client.username, oldUDP, answer.UDPAddr)
+	}
 
 	// Forward to the peer identified by the answer's target
 	s.mu.RLock()
 	room, exists := s.rooms[client.roomName]
 	s.mu.RUnlock()
 	if !exists {
+		log.Printf("[Server-P2P] 转发P2PAnswer失败: 客户端 %s 不在任何房间中", client.username)
 		return
 	}
 
@@ -738,6 +770,7 @@ func (s *Server) handleP2PAnswer(client *Client, payload []byte) {
 	}
 	room.mu.RUnlock()
 
+	log.Printf("[Server-P2P] 转发P2PAnswer到 %d 个对端", len(peers))
 	for _, c := range peers {
 		c.mu.Lock()
 		protocol.WriteMessage(c.conn, &protocol.Message{Type: protocol.MsgTypeP2PAnswer, Payload: data})

@@ -112,28 +112,38 @@ func main() {
 		defer logFile.Close()
 	}
 	log.SetOutput(io.MultiWriter(writers...))
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	if err != nil {
 		log.Printf("警告: 无法打开日志文件: %v", err)
 	} else {
 		log.Printf("日志文件: %s", logFilePath)
 	}
 
+	log.Printf("[启动] 操作系统: %s/%s, Go版本: %s, PID: %d",
+		runtime.GOOS, runtime.GOARCH, runtime.Version(), os.Getpid())
+
 	// On Windows, attempt to self-elevate via UAC if not already running as
 	// administrator. This is important because creating TUN devices (wintun)
 	// requires admin privileges.
+	log.Printf("[启动] 检查管理员权限...")
 	ensureElevated()
+	log.Printf("[启动] 权限检查完成")
 
+	log.Printf("[启动] 正在初始化 Fyne GUI 框架...")
 	a := app.New()
+	log.Printf("[启动] Fyne app 创建成功")
 	a.SetIcon(AppIcon)
 	w := a.NewWindow("神区互联 - GodQV Networking")
 	w.SetIcon(AppIcon)
 	w.Resize(fyne.NewSize(520, 600))
+	log.Printf("[启动] 主窗口创建成功 (520x600)")
 
 	gui := &GUI{
 		app:    a,
 		window: w,
 	}
 	gui.showLoginScreen()
+	log.Printf("[启动] 登录界面已加载, 即将显示窗口...")
 
 	w.ShowAndRun()
 }
@@ -185,6 +195,7 @@ func (g *GUI) showLoginScreen() {
 		statusLabel.SetText("正在连接...")
 
 		go func() {
+			log.Printf("[GUI] 用户发起连接: 服务器=%s, 用户名=%s", server, user)
 			cfg := client.Config{
 				ServerAddr: server,
 				Username:   user,
@@ -192,11 +203,13 @@ func (g *GUI) showLoginScreen() {
 			}
 			c := client.New(cfg)
 			if err := c.Connect(); err != nil {
+				log.Printf("[GUI] 连接失败: %v", err)
 				fyne.Do(func() {
 					statusLabel.SetText(fmt.Sprintf("连接失败: %v", err))
 				})
 				return
 			}
+			log.Printf("[GUI] 连接成功, 进入房间选择界面")
 
 			g.mu.Lock()
 			g.client = c
@@ -323,6 +336,7 @@ func (g *GUI) showRoomScreen() {
 				statusLabel.SetText(fmt.Sprintf("正在加入房间 %s...", roomName))
 
 				go func() {
+					log.Printf("[GUI] 加入房间: %s", roomName)
 					g.client.SetConfig(client.Config{
 						ServerAddr: g.client.ServerAddr(),
 						Username:   g.client.Username(),
@@ -330,11 +344,13 @@ func (g *GUI) showRoomScreen() {
 						RoomPass:   pass,
 					})
 					if err := g.client.JoinRoom(); err != nil {
+						log.Printf("[GUI] 加入房间失败: %v", err)
 						fyne.Do(func() {
 							statusLabel.SetText(fmt.Sprintf("加入失败: %v", err))
 						})
 						return
 					}
+					log.Printf("[GUI] 加入房间成功: %s", roomName)
 					fyne.Do(func() {
 						g.showMainScreen()
 					})
@@ -483,10 +499,13 @@ func (g *GUI) showMainScreen() {
 		switch event.Type {
 		case p2p.EventPunchStart:
 			msg = fmt.Sprintf("P2P: 正在与 %s 打洞...", event.PeerVIP)
+			log.Printf("[P2P-GUI] 开始打洞: 对端VIP=%s, 对端地址=%s", event.PeerVIP, event.PeerAddr)
 		case p2p.EventPunchSuccess:
 			msg = fmt.Sprintf("P2P: 与 %s 打洞成功! (UDP: %s)", event.PeerVIP, event.PeerAddr)
+			log.Printf("[P2P-GUI] 打洞成功: 对端VIP=%s, UDP地址=%s", event.PeerVIP, event.PeerAddr)
 		case p2p.EventPunchTimeout:
 			msg = fmt.Sprintf("P2P: 与 %s 打洞超时 (对方可能在对称NAT后, 将使用TCP中继)", event.PeerVIP)
+			log.Printf("[P2P-GUI] 打洞超时: 对端VIP=%s, 对端地址=%s (可能原因: 对称NAT/防火墙/Hairpin NAT不支持/对端离线)", event.PeerVIP, event.PeerAddr)
 		}
 		if msg != "" {
 			fyne.Do(func() {
@@ -497,9 +516,12 @@ func (g *GUI) showMainScreen() {
 
 	// Try to initialise P2P (after setting event callback)
 	var p2pInitErr string
+	log.Printf("[GUI] 正在初始化 P2P...")
 	if err := g.client.InitP2P(); err != nil {
 		p2pInitErr = fmt.Sprintf("P2P初始化失败: %v (将使用TCP中继)", err)
-		log.Printf("%s", p2pInitErr)
+		log.Printf("[GUI] %s", p2pInitErr)
+	} else {
+		log.Printf("[GUI] P2P 初始化成功")
 	}
 
 	// Peer list

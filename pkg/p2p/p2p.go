@@ -189,7 +189,18 @@ func (m *Manager) GetActiveLink(vip net.IP) bool {
 
 // punchHole attempts to establish a direct UDP link by repeatedly sending probes.
 func (m *Manager) punchHole(link *PeerLink) {
-	log.Printf("[P2P] 开始打洞过程: 目标=%s (%s), 超时=%v", link.PeerVIP, link.PeerAddr, PunchTimeout)
+	log.Printf("[P2P] 开始打洞过程: 目标=%s (%s), 本地=%s, 超时=%v",
+		link.PeerVIP, link.PeerAddr, m.localAddr, PunchTimeout)
+
+	// Detect potential hairpin NAT scenario (same public IP)
+	localHost, _, _ := net.SplitHostPort(m.localAddr)
+	peerHost, _, _ := net.SplitHostPort(link.PeerAddr.String())
+	if localHost == peerHost {
+		log.Printf("[P2P] ⚠ 警告: 本地和对端公网IP相同 (%s), 两端可能在同一NAT后面。"+
+			"如果路由器不支持 Hairpin NAT (NAT Loopback), UDP打洞将失败。"+
+			"建议: 检查路由器是否开启NAT回环/Hairpin NAT功能。", localHost)
+	}
+
 	m.emitEvent(Event{Type: EventPunchStart, PeerVIP: link.PeerVIP, PeerAddr: link.PeerAddr.String()})
 
 	deadline := time.After(PunchTimeout)
@@ -198,6 +209,7 @@ func (m *Manager) punchHole(link *PeerLink) {
 
 	probe := []byte(MagicProbe + ":" + generateP2PToken())
 	probeCount := 0
+	lastLogTime := time.Now()
 
 	for {
 		select {
@@ -206,7 +218,22 @@ func (m *Manager) punchHole(link *PeerLink) {
 			return
 		case <-deadline:
 			if !link.Active {
-				log.Printf("[P2P] 打洞超时: %s (发送了 %d 个探测包), 可能原因: 对称NAT/防火墙阻挡/对端离线", link.PeerVIP, probeCount)
+				log.Printf("[P2P] ═══════════════════════════════════════════════")
+				log.Printf("[P2P] 打洞超时: %s", link.PeerVIP)
+				log.Printf("[P2P]   本地地址: %s", m.localAddr)
+				log.Printf("[P2P]   对端地址: %s", link.PeerAddr)
+				log.Printf("[P2P]   发送探测包: %d 个", probeCount)
+				log.Printf("[P2P]   超时时间: %v", PunchTimeout)
+				if localHost == peerHost {
+					log.Printf("[P2P]   ⚠ 检测到相同公网IP: 可能是 Hairpin NAT 问题")
+				}
+				log.Printf("[P2P]   可能原因:")
+				log.Printf("[P2P]     1. 对称NAT (Symmetric NAT) - STUN获取的端口不等于实际通信端口")
+				log.Printf("[P2P]     2. 防火墙阻挡UDP数据包")
+				log.Printf("[P2P]     3. 路由器不支持 Hairpin NAT (两端在同一NAT后)")
+				log.Printf("[P2P]     4. 对端离线或P2P未初始化")
+				log.Printf("[P2P]     5. STUN发现的地址不正确")
+				log.Printf("[P2P] ═══════════════════════════════════════════════")
 				m.emitEvent(Event{Type: EventPunchTimeout, PeerVIP: link.PeerVIP, PeerAddr: link.PeerAddr.String()})
 			}
 			return
@@ -220,6 +247,12 @@ func (m *Manager) punchHole(link *PeerLink) {
 			if err != nil {
 				log.Printf("[P2P] 发送探测包失败 #%d → %s: %v", probeCount, link.PeerAddr, err)
 			}
+			// Log progress every 2 seconds
+			if time.Since(lastLogTime) >= 2*time.Second {
+				log.Printf("[P2P] 打洞进行中: 目标=%s, 已发送 %d 个探测包, 尚未收到回应",
+					link.PeerVIP, probeCount)
+				lastLogTime = time.Now()
+			}
 		}
 	}
 }
@@ -227,6 +260,7 @@ func (m *Manager) punchHole(link *PeerLink) {
 // readLoop continuously reads from the UDP socket and dispatches packets.
 func (m *Manager) readLoop() {
 	buf := make([]byte, UDPReadBuf)
+	pktCount := 0
 	for {
 		select {
 		case <-m.done:
@@ -253,12 +287,17 @@ func (m *Manager) readLoop() {
 
 		// Check if it's a probe
 		if isProbe(data) {
+			log.Printf("[P2P] 收到探测包: 来源=%s, 大小=%d字节", remoteAddr, n)
 			m.handleProbe(remoteAddr)
 			continue
 		}
 
 		// Real data packet - deliver via callback
 		if m.onPacket != nil && n > 0 {
+			pktCount++
+			if pktCount <= 5 || pktCount%100 == 0 {
+				log.Printf("[P2P] 收到P2P数据包 #%d: 来源=%s, 大小=%d字节", pktCount, remoteAddr, n)
+			}
 			pkt := make([]byte, n)
 			copy(pkt, data)
 			m.onPacket(pkt)
@@ -275,10 +314,12 @@ func (m *Manager) handleProbe(addr *net.UDPAddr) {
 		if link.PeerAddr.IP.Equal(addr.IP) && link.PeerAddr.Port == addr.Port {
 			if !link.Active {
 				link.Active = true
-				log.Printf("[P2P] 打洞成功! 与 %s 建立直连 (UDP: %s)", link.PeerVIP, addr)
+				log.Printf("[P2P] ✓ 打洞成功! 与 %s 建立直连 (UDP: %s) [精确匹配IP:Port]", link.PeerVIP, addr)
 				vip := make(net.IP, len(link.PeerVIP))
 				copy(vip, link.PeerVIP)
 				evt = &Event{Type: EventPunchSuccess, PeerVIP: vip, PeerAddr: addr.String()}
+			} else {
+				log.Printf("[P2P] 收到已建立连接的探测包: %s (UDP: %s)", link.PeerVIP, addr)
 			}
 			m.mu.Unlock()
 			if evt != nil {
@@ -288,12 +329,14 @@ func (m *Manager) handleProbe(addr *net.UDPAddr) {
 		}
 	}
 
-	// Probe from unknown source, update addr if we have a link from that IP
+	// Probe from unknown port, update addr if we have a link from that IP
 	for _, link := range m.links {
 		if link.PeerAddr.IP.Equal(addr.IP) {
+			oldAddr := link.PeerAddr.String()
 			link.PeerAddr = addr
 			link.Active = true
-			log.Printf("[P2P] 打洞成功! 与 %s 建立直连 (UDP: %s, 端口已更新)", link.PeerVIP, addr)
+			log.Printf("[P2P] ✓ 打洞成功! 与 %s 建立直连 (UDP: %s, 端口已从 %s 更新) [IP匹配,端口不同-可能NAT重映射]",
+				link.PeerVIP, addr, oldAddr)
 			vip := make(net.IP, len(link.PeerVIP))
 			copy(vip, link.PeerVIP)
 			evt = &Event{Type: EventPunchSuccess, PeerVIP: vip, PeerAddr: addr.String()}
@@ -302,6 +345,14 @@ func (m *Manager) handleProbe(addr *net.UDPAddr) {
 				m.emitEvent(*evt)
 			}
 			return
+		}
+	}
+
+	// Log unmatched probe
+	log.Printf("[P2P] 收到未匹配的探测包: 来源=%s (没有对应的已知对端)", addr)
+	if len(m.links) > 0 {
+		for vip, link := range m.links {
+			log.Printf("[P2P]   已知对端: VIP=%s, 地址=%s, 活跃=%v", vip, link.PeerAddr, link.Active)
 		}
 	}
 	m.mu.Unlock()
